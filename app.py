@@ -548,8 +548,10 @@ async def upload_video(file: UploadFile = File(...)) -> JSONResponse:
     target_path = UPLOAD_DIR / f"{source_id}_{filename}"
 
     total = 0
+    # Use larger chunks (4MB) for faster upload
+    chunk_size = 4 * 1024 * 1024
     with target_path.open("wb") as fp:
-        while chunk := await file.read(1024 * 1024):
+        while chunk := await file.read(chunk_size):
             total += len(chunk)
             if total > MAX_UPLOAD_SIZE:
                 fp.close()

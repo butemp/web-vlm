@@ -389,14 +389,48 @@ async function uploadVideo() {
   }
 
   el.uploadBtn.disabled = true;
-  el.uploadBtn.textContent = "上传中...";
+  const originalText = el.uploadBtn.textContent;
 
   try {
     const fd = new FormData();
     fd.append("file", file);
 
-    setStatus("上传中...", false);
-    const data = await fetchJson("/api/source/upload", { method: "POST", body: fd });
+    // Use XMLHttpRequest for progress tracking
+    const data = await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const percent = Math.round((e.loaded / e.total) * 100);
+          el.uploadBtn.textContent = `上传中 ${percent}%`;
+          setStatus(`上传中 ${percent}%`, false);
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            resolve(JSON.parse(xhr.responseText));
+          } catch {
+            reject(new Error("服务返回非 JSON"));
+          }
+        } else {
+          try {
+            const err = JSON.parse(xhr.responseText);
+            reject(new Error(err.detail || `上传失败 (HTTP ${xhr.status})`));
+          } catch {
+            reject(new Error(`上传失败 (HTTP ${xhr.status})`));
+          }
+        }
+      };
+
+      xhr.onerror = () => reject(new Error("网络错误"));
+      xhr.ontimeout = () => reject(new Error("上传超时"));
+
+      xhr.open("POST", "/api/source/upload");
+      xhr.timeout = 300000; // 5 minutes timeout
+      xhr.send(fd);
+    });
 
     state.sourceId = data.source_id;
     state.sourceKind = data.kind || "file";
@@ -407,7 +441,7 @@ async function uploadVideo() {
     addLog(`✓ 已加载: ${data.name}`);
   } finally {
     el.uploadBtn.disabled = false;
-    el.uploadBtn.textContent = "上传并加载";
+    el.uploadBtn.textContent = originalText;
   }
 }
 
