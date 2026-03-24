@@ -47,6 +47,7 @@
             <div class="tab-group" id="sourceTypeSeg">
               <button class="tab-btn active" data-source-type="upload">上传视频</button>
               <button class="tab-btn" data-source-type="url">流媒体 URL</button>
+              <button class="tab-btn" data-source-type="local">服务器文件</button>
             </div>
             <div id="uploadPanel" class="source-panel">
               <label class="file-drop" id="fileDrop">
@@ -62,6 +63,13 @@
                 <input type="text" id="streamUrl" class="input" placeholder="rtsp://... 或 http://..." />
               </div>
               <button id="urlBtn" class="btn btn-primary btn-block">连接视频流</button>
+            </div>
+            <div id="localPanel" class="source-panel hidden">
+              <div class="input-group">
+                <input type="text" id="localPath" class="input" placeholder="/data/videos/demo.mp4" />
+              </div>
+              <span class="file-drop-hint">先通过 scp 传到服务器，再填写服务器上的文件路径</span>
+              <button id="localBtn" class="btn btn-primary btn-block">加载本地文件</button>
             </div>
           </section>
 

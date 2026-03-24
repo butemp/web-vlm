@@ -21,10 +21,13 @@ const el = {
   modeSeg: document.getElementById("modeSeg"),
   uploadPanel: document.getElementById("uploadPanel"),
   urlPanel: document.getElementById("urlPanel"),
+  localPanel: document.getElementById("localPanel"),
   videoFile: document.getElementById("videoFile"),
   uploadBtn: document.getElementById("uploadBtn"),
   streamUrl: document.getElementById("streamUrl"),
   urlBtn: document.getElementById("urlBtn"),
+  localPath: document.getElementById("localPath"),
+  localBtn: document.getElementById("localBtn"),
   targetRow: document.getElementById("targetRow"),
   targetInput: document.getElementById("targetInput"),
   startBtn: document.getElementById("startBtn"),
@@ -114,16 +117,41 @@ async function tryStartDirectPlayback() {
   stopNativePlayback();
   const player = el.streamPlayer;
 
-  // For uploaded files, use native playback in infer mode only
-  if (sourceKind === "file" && state.mode === "infer") {
+  // For uploaded files, try native playback first
+  if (sourceKind === "file") {
+    // Only use native playback in infer mode
+    // In detect mode, we need MJPEG stream to show detection boxes
+    if (state.mode !== "infer") {
+      return false;
+    }
+    
     player.src = playbackUrl;
     player.style.display = "block";
+    
+    // Add error handler to fallback to MJPEG if native playback fails
+    const errorHandler = () => {
+      console.warn("Native video playback failed, will use MJPEG stream");
+      player.style.display = "none";
+      player.removeEventListener("error", errorHandler);
+    };
+    player.addEventListener("error", errorHandler);
+    
     try {
       await player.play();
-    } catch {
-      // User gesture / browser policy can block, controls stay available.
+      // Remove error handler if play succeeds
+      player.removeEventListener("error", errorHandler);
+      return true;
+    } catch (e) {
+      console.warn("Native video play() failed:", e);
+      // Don't return false immediately - the video might still load
+      // Check if video has valid duration after a short delay
+      await new Promise(r => setTimeout(r, 500));
+      if (player.readyState >= 2) {
+        return true;
+      }
+      player.style.display = "none";
+      return false;
     }
-    return true;
   }
 
   // For HLS streams, ALWAYS use native playback (both infer and detect modes)
@@ -234,6 +262,7 @@ function updateSourceTypeUI() {
   });
   el.uploadPanel.classList.toggle("hidden", state.sourceType !== "upload");
   el.urlPanel.classList.toggle("hidden", state.sourceType !== "url");
+  el.localPanel.classList.toggle("hidden", state.sourceType !== "local");
 }
 
 function updateModeUI() {
@@ -377,6 +406,23 @@ async function startVideoStream() {
   setLive(true);
 }
 
+async function uploadChunkWithRetry(url, formData, maxRetries = 3) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const resp = await fetch(url, { method: "POST", body: formData });
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(`HTTP ${resp.status}: ${text}`);
+      }
+      return await resp.json();
+    } catch (err) {
+      if (attempt === maxRetries) throw err;
+      // Wait before retry: 1s, 2s, 3s...
+      await new Promise(r => setTimeout(r, attempt * 1000));
+    }
+  }
+}
+
 async function uploadVideo() {
   if (state.runId || state.eventSource) {
     await stopAnalysis(true);
@@ -390,46 +436,76 @@ async function uploadVideo() {
 
   el.uploadBtn.disabled = true;
   const originalText = el.uploadBtn.textContent;
+  const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB per chunk
 
   try {
-    const fd = new FormData();
-    fd.append("file", file);
+    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+    const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
+    addLog(`⏳ 开始分片上传: ${file.name} (${sizeMB}MB, ${totalChunks} 片)`);
 
-    // Use XMLHttpRequest for progress tracking
-    const data = await new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) {
-          const percent = Math.round((e.loaded / e.total) * 100);
+    // Step 1: Init upload session
+    setStatus("初始化上传...", false);
+    el.uploadBtn.textContent = "初始化...";
+    const initData = await fetchJson("/api/upload/init", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        filename: file.name,
+        total_size: file.size,
+        total_chunks: totalChunks,
+      }),
+    });
+    const uploadId = initData.upload_id;
+
+    // Step 2: Upload chunks with progress
+    let uploadedChunks = 0;
+    // Upload chunks with limited concurrency (2 at a time)
+    const CONCURRENCY = 2;
+    let nextChunk = 0;
+    const errors = [];
+
+    async function uploadNext() {
+      while (nextChunk < totalChunks) {
+        const idx = nextChunk++;
+        const start = idx * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, file.size);
+        const blob = file.slice(start, end);
+
+        const fd = new FormData();
+        fd.append("file", blob, `chunk_${idx}`);
+
+        try {
+          await uploadChunkWithRetry(
+            `/api/upload/chunk?upload_id=${encodeURIComponent(uploadId)}&chunk_index=${idx}`,
+            fd
+          );
+          uploadedChunks++;
+          const percent = Math.round((uploadedChunks / totalChunks) * 100);
           el.uploadBtn.textContent = `上传中 ${percent}%`;
-          setStatus(`上传中 ${percent}%`, false);
+          setStatus(`上传中 ${percent}% (${uploadedChunks}/${totalChunks})`, false);
+        } catch (err) {
+          errors.push({ idx, err });
         }
-      };
+      }
+    }
 
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          try {
-            resolve(JSON.parse(xhr.responseText));
-          } catch {
-            reject(new Error("服务返回非 JSON"));
-          }
-        } else {
-          try {
-            const err = JSON.parse(xhr.responseText);
-            reject(new Error(err.detail || `上传失败 (HTTP ${xhr.status})`));
-          } catch {
-            reject(new Error(`上传失败 (HTTP ${xhr.status})`));
-          }
-        }
-      };
+    const workers = [];
+    for (let i = 0; i < Math.min(CONCURRENCY, totalChunks); i++) {
+      workers.push(uploadNext());
+    }
+    await Promise.all(workers);
 
-      xhr.onerror = () => reject(new Error("网络错误"));
-      xhr.ontimeout = () => reject(new Error("上传超时"));
+    if (errors.length > 0) {
+      throw new Error(`${errors.length} 个分片上传失败，请重试`);
+    }
 
-      xhr.open("POST", "/api/source/upload");
-      xhr.timeout = 300000; // 5 minutes timeout
-      xhr.send(fd);
+    // Step 3: Complete / merge
+    el.uploadBtn.textContent = "合并中...";
+    setStatus("合并文件...", false);
+    const data = await fetchJson("/api/upload/complete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ upload_id: uploadId }),
     });
 
     state.sourceId = data.source_id;
@@ -438,7 +514,7 @@ async function uploadVideo() {
     el.startBtn.disabled = false;
     el.streamMeta.textContent = `来源: ${data.name} (${data.size_mb || "?"}MB)`;
     setStatus("视频已就绪", true);
-    addLog(`✓ 已加载: ${data.name}`);
+    addLog(`✓ 已加载: ${data.name} (${data.size_mb}MB)`);
   } finally {
     el.uploadBtn.disabled = false;
     el.uploadBtn.textContent = originalText;
@@ -475,6 +551,39 @@ async function registerUrl() {
     addLog(`✓ 已接入: ${url}`);
   } finally {
     el.urlBtn.disabled = false;
+  }
+}
+
+async function loadLocalFile() {
+  if (state.runId || state.eventSource) {
+    await stopAnalysis(true);
+  }
+
+  const localPath = el.localPath.value.trim();
+  if (!localPath) {
+    addLog("⚠ 请输入服务器上的文件路径");
+    return;
+  }
+
+  el.localBtn.disabled = true;
+  setStatus("加载中...", false);
+
+  try {
+    const data = await fetchJson("/api/source/local", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: localPath }),
+    });
+
+    state.sourceId = data.source_id;
+    state.sourceKind = data.kind || "file";
+    state.playbackUrl = data.playback_url || "";
+    el.startBtn.disabled = false;
+    el.streamMeta.textContent = `来源: ${data.name} (${data.size_mb || "?"}MB)`;
+    setStatus("视频已就绪", true);
+    addLog(`✓ 已加载服务器文件: ${data.name}`);
+  } finally {
+    el.localBtn.disabled = false;
   }
 }
 
@@ -532,6 +641,11 @@ el.uploadBtn.addEventListener("click", async () => {
 el.urlBtn.addEventListener("click", async () => {
   try { await registerUrl(); }
   catch (err) { addLog(`❌ 连接失败: ${err.message}`, true); setStatus("连接失败", false); }
+});
+
+el.localBtn.addEventListener("click", async () => {
+  try { await loadLocalFile(); }
+  catch (err) { addLog(`❌ 加载失败: ${err.message}`, true); setStatus("加载失败", false); }
 });
 
 el.startBtn.addEventListener("click", async () => {

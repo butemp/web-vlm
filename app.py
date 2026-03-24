@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import queue
+import shutil
 import threading
 import time
 import uuid
@@ -541,6 +542,123 @@ async def defaults() -> JSONResponse:
     return JSONResponse({"default_prompt": DEFAULT_PROMPT})
 
 
+# ---------------------------------------------------------------------------
+# Chunked Upload — reliable through tunnels / slow connections
+# ---------------------------------------------------------------------------
+_upload_sessions: Dict[str, Dict[str, object]] = {}
+_upload_sessions_lock = threading.Lock()
+
+
+@app.post("/api/upload/init")
+async def upload_init(payload: Dict[str, object]) -> JSONResponse:
+    """Initialize a chunked upload session."""
+    filename = _safe_filename(str(payload.get("filename", "video.mp4")))
+    total_size = int(payload.get("total_size", 0))
+    total_chunks = int(payload.get("total_chunks", 0))
+
+    if total_size <= 0 or total_chunks <= 0:
+        raise HTTPException(status_code=400, detail="参数无效")
+    if total_size > MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"文件过大，最大支持 {MAX_UPLOAD_SIZE // (1024*1024)} MB",
+        )
+
+    upload_id = str(uuid.uuid4())
+    chunk_dir = UPLOAD_DIR / f"chunks_{upload_id}"
+    chunk_dir.mkdir(exist_ok=True)
+
+    with _upload_sessions_lock:
+        _upload_sessions[upload_id] = {
+            "filename": filename,
+            "total_size": total_size,
+            "total_chunks": total_chunks,
+            "received": set(),
+            "chunk_dir": str(chunk_dir),
+            "created": time.time(),
+        }
+
+    return JSONResponse({"upload_id": upload_id, "message": "上传会话已创建"})
+
+
+@app.post("/api/upload/chunk")
+async def upload_chunk(
+    upload_id: str = Query(...),
+    chunk_index: int = Query(...),
+    file: UploadFile = File(...),
+) -> JSONResponse:
+    """Receive a single chunk."""
+    with _upload_sessions_lock:
+        session = _upload_sessions.get(upload_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="上传会话不存在或已过期")
+
+    if chunk_index < 0 or chunk_index >= session["total_chunks"]:
+        raise HTTPException(status_code=400, detail="分片索引无效")
+
+    chunk_path = Path(session["chunk_dir"]) / f"{chunk_index:06d}"
+    data = await file.read()
+    chunk_path.write_bytes(data)
+
+    with _upload_sessions_lock:
+        session["received"].add(chunk_index)
+        received_count = len(session["received"])
+
+    return JSONResponse({
+        "chunk_index": chunk_index,
+        "received": received_count,
+        "total_chunks": session["total_chunks"],
+    })
+
+
+@app.post("/api/upload/complete")
+async def upload_complete(payload: Dict[str, str]) -> JSONResponse:
+    """Merge all chunks into the final file."""
+    upload_id = (payload.get("upload_id") or "").strip()
+
+    with _upload_sessions_lock:
+        session = _upload_sessions.get(upload_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="上传会话不存在")
+
+    total_chunks = session["total_chunks"]
+    if len(session["received"]) < total_chunks:
+        missing = total_chunks - len(session["received"])
+        raise HTTPException(status_code=400, detail=f"还有 {missing} 个分片未上传")
+
+    filename = session["filename"]
+    source_id = str(uuid.uuid4())
+    target_path = UPLOAD_DIR / f"{source_id}_{filename}"
+    chunk_dir = Path(session["chunk_dir"])
+
+    # Merge chunks
+    total_written = 0
+    with target_path.open("wb") as fp:
+        for i in range(total_chunks):
+            cp = chunk_dir / f"{i:06d}"
+            chunk_data = cp.read_bytes()
+            fp.write(chunk_data)
+            total_written += len(chunk_data)
+
+    # Clean up chunks
+    shutil.rmtree(str(chunk_dir), ignore_errors=True)
+    with _upload_sessions_lock:
+        _upload_sessions.pop(upload_id, None)
+
+    SOURCES[source_id] = {"kind": "file", "value": str(target_path), "name": filename}
+    return JSONResponse(
+        {
+            "source_id": source_id,
+            "kind": "file",
+            "name": filename,
+            "playback_url": f"/api/source/{source_id}/file",
+            "size_mb": round(total_written / (1024 * 1024), 2),
+            "message": "视频上传成功",
+        }
+    )
+
+
+# Legacy single-file upload (for small files / direct access)
 @app.post("/api/source/upload")
 async def upload_video(file: UploadFile = File(...)) -> JSONResponse:
     filename = _safe_filename(file.filename or "video.mp4")
@@ -548,7 +666,6 @@ async def upload_video(file: UploadFile = File(...)) -> JSONResponse:
     target_path = UPLOAD_DIR / f"{source_id}_{filename}"
 
     total = 0
-    # Use larger chunks (4MB) for faster upload
     chunk_size = 4 * 1024 * 1024
     with target_path.open("wb") as fp:
         while chunk := await file.read(chunk_size):
@@ -598,8 +715,37 @@ async def register_url(payload: Dict[str, str]) -> JSONResponse:
     )
 
 
+@app.post("/api/source/local")
+async def register_local(payload: Dict[str, str]) -> JSONResponse:
+    """Load a video file that already exists on the server."""
+    file_path = (payload.get("path") or "").strip()
+    if not file_path:
+        raise HTTPException(status_code=400, detail="路径不能为空")
+
+    if not os.path.isabs(file_path):
+        raise HTTPException(status_code=400, detail="请使用绝对路径，例如 /data/videos/demo.mp4")
+
+    if not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail=f"文件不存在: {file_path}")
+
+    filename = Path(file_path).name
+    file_size = os.path.getsize(file_path)
+    source_id = str(uuid.uuid4())
+    SOURCES[source_id] = {"kind": "file", "value": file_path, "name": filename}
+    return JSONResponse(
+        {
+            "source_id": source_id,
+            "kind": "file",
+            "name": filename,
+            "playback_url": f"/api/source/{source_id}/file",
+            "size_mb": round(file_size / (1024 * 1024), 2),
+            "message": "服务器本地文件加载成功",
+        }
+    )
+
+
 @app.get("/api/source/{source_id}/file")
-async def source_file(source_id: str):
+async def source_file(source_id: str, request: Request):
     source = SOURCES.get(source_id)
     if not source:
         raise HTTPException(status_code=404, detail="source_id 不存在")
@@ -609,7 +755,24 @@ async def source_file(source_id: str):
     path = source.get("value", "")
     if not path or (not os.path.exists(path)):
         raise HTTPException(status_code=404, detail="文件不存在")
-    return FileResponse(path)
+    
+    # Determine media type from extension
+    ext = Path(path).suffix.lower()
+    media_types = {
+        ".mp4": "video/mp4",
+        ".webm": "video/webm",
+        ".mkv": "video/x-matroska",
+        ".avi": "video/x-msvideo",
+        ".mov": "video/quicktime",
+        ".m4v": "video/x-m4v",
+    }
+    media_type = media_types.get(ext, "video/mp4")
+    
+    return FileResponse(
+        path,
+        media_type=media_type,
+        filename=source.get("name", "video.mp4"),
+    )
 
 
 @app.post("/api/control/start")
