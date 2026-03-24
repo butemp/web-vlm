@@ -5,11 +5,14 @@
 const state = {
   sourceId: null,
   runId: null,
+  sourceKind: "",
+  playbackUrl: "",
   sourceType: "upload",
   mode: "infer",
   theme: "dark",
   defaultPrompt: "",
   eventSource: null,
+  hls: null,
   activeLogNode: null,
 };
 
@@ -26,6 +29,7 @@ const el = {
   targetInput: document.getElementById("targetInput"),
   startBtn: document.getElementById("startBtn"),
   stopBtn: document.getElementById("stopBtn"),
+  streamPlayer: document.getElementById("streamPlayer"),
   streamView: document.getElementById("streamView"),
   streamPlaceholder: document.getElementById("streamPlaceholder"),
   statusChip: document.getElementById("statusChip"),
@@ -52,6 +56,109 @@ function setStatus(text, active = false) {
 
 function setLive(active) {
   el.liveIndicator.classList.toggle("active", active);
+}
+
+async function fetchJson(url, options = {}) {
+  const resp = await fetch(url, options);
+  const raw = await resp.text();
+
+  let data = {};
+  if (raw) {
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      const preview = raw.slice(0, 160).replace(/\s+/g, " ");
+      throw new Error(`服务返回非 JSON（HTTP ${resp.status}）：${preview || "<empty>"}`);
+    }
+  }
+
+  if (!resp.ok) {
+    throw new Error(data.detail || data.message || `请求失败（HTTP ${resp.status}）`);
+  }
+  return data;
+}
+
+function isHlsUrl(url) {
+  if (!url) return false;
+  return url.toLowerCase().includes(".m3u8");
+}
+
+function stopNativePlayback() {
+  if (state.hls) {
+    try {
+      state.hls.destroy();
+    } catch {
+      // ignore
+    }
+    state.hls = null;
+  }
+  if (el.streamPlayer) {
+    try {
+      el.streamPlayer.pause();
+    } catch {
+      // ignore
+    }
+    el.streamPlayer.removeAttribute("src");
+    el.streamPlayer.load();
+    el.streamPlayer.style.display = "none";
+  }
+}
+
+async function tryStartDirectPlayback() {
+  if (!el.streamPlayer) return false;
+  if (state.mode !== "infer") return false;
+
+  const sourceKind = state.sourceKind || "";
+  const playbackUrl = state.playbackUrl || "";
+  if (!playbackUrl) return false;
+
+  stopNativePlayback();
+  const player = el.streamPlayer;
+
+  if (sourceKind === "file") {
+    player.src = playbackUrl;
+    player.style.display = "block";
+    try {
+      await player.play();
+    } catch {
+      // User gesture / browser policy can block, controls stay available.
+    }
+    return true;
+  }
+
+  if (sourceKind === "url" && isHlsUrl(playbackUrl)) {
+    if (player.canPlayType("application/vnd.apple.mpegurl")) {
+      player.src = playbackUrl;
+      player.style.display = "block";
+      try {
+        await player.play();
+      } catch {
+        // ignore
+      }
+      return true;
+    }
+
+    if (window.Hls && window.Hls.isSupported()) {
+      const hls = new window.Hls({
+        lowLatencyMode: true,
+        backBufferLength: 20,
+        maxBufferLength: 12,
+        liveSyncDurationCount: 2,
+      });
+      hls.loadSource(playbackUrl);
+      hls.attachMedia(player);
+      state.hls = hls;
+      player.style.display = "block";
+      try {
+        await player.play();
+      } catch {
+        // ignore
+      }
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function applyTheme(theme) {
@@ -141,7 +248,7 @@ async function stopAnalysis(notifyBackend = true) {
 
   if (notifyBackend && sourceId && runId) {
     try {
-      await fetch("/api/control/stop", {
+      await fetchJson("/api/control/stop", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ source_id: sourceId, run_id: runId }),
@@ -152,6 +259,7 @@ async function stopAnalysis(notifyBackend = true) {
   }
 
   state.runId = null;
+  stopNativePlayback();
   el.streamView.removeAttribute("src");
   el.streamView.style.display = "none";
   el.streamPlaceholder.style.display = "flex";
@@ -172,14 +280,13 @@ async function startVideoStream() {
     await stopAnalysis(true);
   }
 
-  const startResp = await fetch("/api/control/start", {
+  const startData = await fetchJson("/api/control/start", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ source_id: state.sourceId }),
   });
-  const startData = await startResp.json();
-  if (!startResp.ok) {
-    throw new Error(startData.detail || "启动分析会话失败");
+  if (!startData.run_id) {
+    throw new Error("后端未返回 run_id，请检查服务端日志");
   }
   state.runId = startData.run_id;
 
@@ -187,9 +294,17 @@ async function startVideoStream() {
 
   const targets = encodeURIComponent(el.targetInput.value.trim());
   const streamUrl = `/api/stream/${state.sourceId}?run_id=${encodeURIComponent(state.runId)}&mode=${state.mode}&targets=${targets}&t=${Date.now()}`;
-  el.streamView.src = streamUrl;
-  el.streamView.style.display = "block";
-  el.streamPlaceholder.style.display = "none";
+  const useDirectPlayback = await tryStartDirectPlayback();
+  if (useDirectPlayback) {
+    el.streamView.removeAttribute("src");
+    el.streamView.style.display = "none";
+    el.streamPlaceholder.style.display = "none";
+  } else {
+    stopNativePlayback();
+    el.streamView.src = streamUrl;
+    el.streamView.style.display = "block";
+    el.streamPlaceholder.style.display = "none";
+  }
   el.streamMeta.textContent = state.mode === "infer"
     ? "Qwen2.5-VL-3B 正在流式推理"
     : "YOLOv8 正在实时检测";
@@ -270,12 +385,11 @@ async function uploadVideo() {
     fd.append("file", file);
 
     setStatus("上传中...", false);
-    const resp = await fetch("/api/source/upload", { method: "POST", body: fd });
-    const data = await resp.json();
-
-    if (!resp.ok) throw new Error(data.detail || "上传失败");
+    const data = await fetchJson("/api/source/upload", { method: "POST", body: fd });
 
     state.sourceId = data.source_id;
+    state.sourceKind = data.kind || "file";
+    state.playbackUrl = data.playback_url || "";
     el.startBtn.disabled = false;
     el.streamMeta.textContent = `来源: ${data.name} (${data.size_mb || "?"}MB)`;
     setStatus("视频已就绪", true);
@@ -301,16 +415,15 @@ async function registerUrl() {
   setStatus("连接中...", false);
 
   try {
-    const resp = await fetch("/api/source/url", {
+    const data = await fetchJson("/api/source/url", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url }),
     });
-    const data = await resp.json();
-
-    if (!resp.ok) throw new Error(data.detail || "URL 注册失败");
 
     state.sourceId = data.source_id;
+    state.sourceKind = data.kind || "url";
+    state.playbackUrl = data.playback_url || url;
     el.startBtn.disabled = false;
     el.streamMeta.textContent = `来源: ${url}`;
     setStatus("流地址已就绪", true);
@@ -323,8 +436,7 @@ async function registerUrl() {
 /* ── Boot ── */
 async function boot() {
   try {
-    const resp = await fetch("/api/defaults");
-    const data = await resp.json();
+    const data = await fetchJson("/api/defaults");
     state.defaultPrompt = data.default_prompt || "请简单描述一下这个视频";
   } catch {
     state.defaultPrompt = "请简单描述一下这个视频";
@@ -428,6 +540,7 @@ el.videoFile.addEventListener("change", () => {
 
 window.addEventListener("beforeunload", () => {
   if (state.eventSource) state.eventSource.close();
+  stopNativePlayback();
   if (state.sourceId && state.runId) {
     try {
       navigator.sendBeacon(

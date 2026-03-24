@@ -273,6 +273,34 @@ def _resize_for_vlm(frame: np.ndarray, max_edge: int = QWEN_MAX_IMAGE_EDGE) -> n
     return _resize_by_max_edge(frame, max_edge=max_edge)
 
 
+def _grab_and_read_frame(cap: cv2.VideoCapture, n_skip: int) -> tuple[bool, np.ndarray]:
+    if n_skip > 0:
+        for _ in range(n_skip):
+            if not cap.grab():
+                return False, None
+    return cap.read()
+
+
+def _resize_draw_encode_jpeg(
+    frame: np.ndarray,
+    max_edge: int,
+    jpeg_quality: int,
+    detections: List[Dict[str, object]] | None = None,
+) -> tuple[np.ndarray, bytes | None]:
+    display_frame = _resize_by_max_edge(frame, max_edge=max_edge)
+    if detections:
+        display_frame = _draw_detections(display_frame, detections)
+
+    ok, encoded = cv2.imencode(
+        ".jpg",
+        display_frame,
+        [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality],
+    )
+    if not ok:
+        return display_frame, None
+    return display_frame, encoded.tobytes()
+
+
 _RunStopBase = StoppingCriteria if StoppingCriteria is not None else object
 
 
@@ -464,6 +492,7 @@ async def upload_video(file: UploadFile = File(...)) -> JSONResponse:
             "source_id": source_id,
             "kind": "file",
             "name": filename,
+            "playback_url": f"/api/source/{source_id}/file",
             "size_mb": round(total / (1024 * 1024), 2),
             "message": "视频上传成功",
         }
@@ -483,9 +512,24 @@ async def register_url(payload: Dict[str, str]) -> JSONResponse:
             "source_id": source_id,
             "kind": "url",
             "name": url,
+            "playback_url": url,
             "message": "视频流地址已注册",
         }
     )
+
+
+@app.get("/api/source/{source_id}/file")
+async def source_file(source_id: str):
+    source = SOURCES.get(source_id)
+    if not source:
+        raise HTTPException(status_code=404, detail="source_id 不存在")
+    if source.get("kind") != "file":
+        raise HTTPException(status_code=400, detail="该 source 不是离线文件")
+
+    path = source.get("value", "")
+    if not path or (not os.path.exists(path)):
+        raise HTTPException(status_code=404, detail="文件不存在")
+    return FileResponse(path)
 
 
 @app.post("/api/control/start")
@@ -506,6 +550,11 @@ async def control_start(payload: Dict[str, str]) -> JSONResponse:
     )
 
 
+@app.get("/api/control/start")
+async def control_start_get(source_id: str = Query("")) -> JSONResponse:
+    return await control_start({"source_id": source_id})
+
+
 @app.post("/api/control/stop")
 async def control_stop(payload: Dict[str, str]) -> JSONResponse:
     source_id = (payload.get("source_id") or "").strip()
@@ -524,6 +573,14 @@ async def control_stop(payload: Dict[str, str]) -> JSONResponse:
             "message": "已请求停止",
         }
     )
+
+
+@app.get("/api/control/stop")
+async def control_stop_get(
+    source_id: str = Query(""),
+    run_id: str = Query(""),
+) -> JSONResponse:
+    return await control_stop({"source_id": source_id, "run_id": run_id})
 
 
 @app.get("/api/stream/{source_id}")
@@ -555,6 +612,7 @@ async def video_stream(
         target_fps = max(4.0, float(STREAM_TARGET_FPS))
         frame_step = max(1, int(round(fps / target_fps))) if fps > target_fps else 1
         delay = 1.0 / target_fps
+        frame_deadline = time.monotonic()
         frame_idx = 0
         last_dets: List[Dict[str, object]] = []
         detect_future = None
@@ -568,13 +626,9 @@ async def video_stream(
                 if not _is_run_active(source_id, run_id):
                     break
 
-                if frame_step > 1:
-                    for _ in range(frame_step - 1):
-                        grabbed = await loop.run_in_executor(None, cap.grab)
-                        if not grabbed:
-                            break
-
-                ret, frame = await loop.run_in_executor(None, cap.read)
+                ret, frame = await loop.run_in_executor(
+                    None, _grab_and_read_frame, cap, frame_step - 1
+                )
                 if not ret:
                     if SOURCES.get(source_id, {}).get("kind") == "file":
                         retry_count += 1
@@ -586,13 +640,16 @@ async def video_stream(
 
                 retry_count = 0
                 frame_idx += 1
-                display_frame = _resize_by_max_edge(frame, max_edge=STREAM_MAX_EDGE)
                 if mode == "infer" and frame_idx % INFER_CACHE_EVERY_N_FRAMES == 0:
+                    # Cache the latest frame for infer SSE without blocking stream timing.
+                    cache_frame = await loop.run_in_executor(
+                        None, _resize_by_max_edge, frame.copy(), QWEN_MAX_IMAGE_EDGE
+                    )
                     with _infer_frame_cache_lock:
                         _infer_frame_cache[source_id] = {
                             "run_id": run_id,
                             "frame": frame_idx,
-                            "image": display_frame.copy(),
+                            "image": cache_frame,
                             "ts": time.time(),
                         }
                 if mode == "detect":
@@ -628,30 +685,42 @@ async def video_stream(
                         )
                         last_detect_submit_ts = now
 
-                    display_frame = _draw_detections(display_frame, last_dets)
-
-                ok, encoded = cv2.imencode(
-                    ".jpg",
-                    display_frame,
-                    [int(cv2.IMWRITE_JPEG_QUALITY), STREAM_JPEG_QUALITY],
+                display_frame, encoded_bytes = await loop.run_in_executor(
+                    None,
+                    _resize_draw_encode_jpeg,
+                    frame,
+                    STREAM_MAX_EDGE,
+                    STREAM_JPEG_QUALITY,
+                    last_dets if mode == "detect" else None,
                 )
-                if not ok:
+                if not encoded_bytes:
                     continue
 
                 yield (
                     b"--frame\r\n"
                     b"Content-Type: image/jpeg\r\n\r\n"
-                    + encoded.tobytes()
+                    + encoded_bytes
                     + b"\r\n"
                 )
-                await asyncio.sleep(delay)
+
+                # Frame pacing with deadline compensation.
+                frame_deadline += delay
+                remaining = frame_deadline - time.monotonic()
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+                elif remaining < -1.0:
+                    frame_deadline = time.monotonic()
         finally:
             cap.release()
 
     return StreamingResponse(
         gen_frames(),
         media_type="multipart/x-mixed-replace; boundary=frame",
-        headers={"Cache-Control": "no-cache"},
+        headers={
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
@@ -669,69 +738,81 @@ async def infer_stream(
 
     async def event_gen():
         loop = asyncio.get_event_loop()
-        last_used_frame = -1
+        try:
+            cap = await loop.run_in_executor(None, _open_capture, source_id)
+        except ValueError as exc:
+            yield f"data: {json.dumps({'type': 'error', 'text': str(exc)}, ensure_ascii=False)}\n\n"
+            return
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if not fps or np.isnan(fps) or fps <= 1:
+            fps = 12.0
+        sample_every_n = max(1, int(fps * 1.4))
+        frame_idx = 0
+        max_loop_retries = 3
+        retry_count = 0
         last_infer_ts = 0.0
-        while True:
-            if await request.is_disconnected():
-                break
-            if not _is_run_active(source_id, run_id):
-                break
 
-            with _infer_frame_cache_lock:
-                state = _infer_frame_cache.get(source_id)
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                if not _is_run_active(source_id, run_id):
+                    break
 
-            if not state or state.get("run_id") != run_id:
-                await asyncio.sleep(0.04)
-                continue
+                ret, frame = await loop.run_in_executor(None, cap.read)
+                if not ret:
+                    if SOURCES.get(source_id, {}).get("kind") == "file":
+                        retry_count += 1
+                        if retry_count > max_loop_retries:
+                            break
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        continue
+                    await asyncio.sleep(0.2)
+                    continue
 
-            frame_idx = int(state.get("frame", -1))
-            cached_ts = float(state.get("ts", 0.0))
-            if frame_idx <= last_used_frame:
-                await asyncio.sleep(0.03)
-                continue
-            if (time.time() - cached_ts) > INFER_CACHE_MAX_AGE_SEC:
-                await asyncio.sleep(0.03)
-                continue
-            if (time.monotonic() - last_infer_ts) < INFER_MIN_INTERVAL_SEC:
-                await asyncio.sleep(0.03)
-                continue
+                retry_count = 0
+                frame_idx += 1
+                if frame_idx % sample_every_n != 0:
+                    await asyncio.sleep(0.01)
+                    continue
+                if (time.monotonic() - last_infer_ts) < INFER_MIN_INTERVAL_SEC:
+                    await asyncio.sleep(0.03)
+                    continue
+                last_infer_ts = time.monotonic()
 
-            frame = state.get("image")
-            if frame is None:
-                await asyncio.sleep(0.03)
-                continue
+                frame = _resize_by_max_edge(frame, max_edge=QWEN_MAX_IMAGE_EDGE)
+                try:
+                    text = await loop.run_in_executor(
+                        None, _qwen_caption, frame.copy(), prompt, source_id, run_id
+                    )
+                except Exception as exc:
+                    logger.exception("Qwen 推理失败: %s", exc)
+                    yield (
+                        f"data: {json.dumps({'type': 'error', 'text': f'Qwen 推理失败: {exc}'}, ensure_ascii=False)}\n\n"
+                    )
+                    await asyncio.sleep(0.2)
+                    continue
 
-            last_used_frame = frame_idx
-            last_infer_ts = time.monotonic()
-            try:
-                text = await loop.run_in_executor(
-                    None, _qwen_caption, frame.copy(), prompt, source_id, run_id
-                )
-            except Exception as exc:
-                logger.exception("Qwen 推理失败: %s", exc)
+                if not _is_run_active(source_id, run_id):
+                    break
+                yield f"data: {json.dumps({'type': 'start', 'text': '', 'frame': frame_idx}, ensure_ascii=False)}\n\n"
+
+                for piece in text.split("，"):
+                    if await request.is_disconnected() or (not _is_run_active(source_id, run_id)):
+                        return
+                    chunk = piece + "，"
+                    yield (
+                        f"data: {json.dumps({'type': 'chunk', 'text': chunk, 'frame': frame_idx}, ensure_ascii=False)}\n\n"
+                    )
+                    await asyncio.sleep(0.12)
+
                 yield (
-                    f"data: {json.dumps({'type': 'error', 'text': f'Qwen 推理失败: {exc}'}, ensure_ascii=False)}\n\n"
+                    f"data: {json.dumps({'type': 'end', 'text': '', 'frame': frame_idx, 'ts': time.time()}, ensure_ascii=False)}\n\n"
                 )
-                await asyncio.sleep(0.2)
-                continue
-
-            if not _is_run_active(source_id, run_id):
-                break
-            yield f"data: {json.dumps({'type': 'start', 'text': '', 'frame': frame_idx}, ensure_ascii=False)}\n\n"
-
-            for piece in text.split("，"):
-                if await request.is_disconnected() or (not _is_run_active(source_id, run_id)):
-                    return
-                chunk = piece + "，"
-                yield (
-                    f"data: {json.dumps({'type': 'chunk', 'text': chunk, 'frame': frame_idx}, ensure_ascii=False)}\n\n"
-                )
-                await asyncio.sleep(0.15)
-
-            yield (
-                f"data: {json.dumps({'type': 'end', 'text': '', 'frame': frame_idx, 'ts': time.time()}, ensure_ascii=False)}\n\n"
-            )
-            await asyncio.sleep(0.06)
+                await asyncio.sleep(0.06)
+        finally:
+            cap.release()
 
     return StreamingResponse(
         event_gen(),

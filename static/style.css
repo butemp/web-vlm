@@ -450,6 +450,14 @@ body[data-theme="light"] .video-container {
   display: none;
   min-height: 420px;
 }
+#streamPlayer {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: none;
+  min-height: 420px;
+  background: rgba(0, 0, 0, 0.25);
+}
 .video-placeholder {
   position: absolute;
   inset: 0;
@@ -584,6 +592,6 @@ body[data-theme="light"] .log-item {
   .panel-inner { flex-direction: column; }
   .ctrl-section { min-width: auto; }
   .ctrl-actions { flex-direction: column; }
-  .video-container, #streamView { min-height: 260px; }
+  .video-container, #streamView, #streamPlayer { min-height: 260px; }
   .prompt-actions { flex-direction: column; }
 }

@@ -99,6 +99,7 @@
           </div>
         </div>
         <div class="video-container">
+          <video id="streamPlayer" autoplay muted playsinline controls></video>
           <img id="streamView" alt="video stream" />
           <div class="video-placeholder" id="streamPlaceholder">
             <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.25"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
@@ -128,6 +129,7 @@
       </aside>
     </main>
   </div>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>
