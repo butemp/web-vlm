@@ -29,6 +29,28 @@
   --transition: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+body[data-theme="light"] {
+  --bg-base: #f4f7ff;
+  --bg-surface: rgba(255, 255, 255, 0.78);
+  --bg-surface-hover: rgba(255, 255, 255, 0.92);
+  --bg-elevated: rgba(255, 255, 255, 0.86);
+  --glass-border: rgba(15, 23, 42, 0.08);
+  --glass-border-light: rgba(15, 23, 42, 0.16);
+  --text-primary: #0f172a;
+  --text-secondary: #334155;
+  --text-muted: #64748b;
+  --accent: #4f46e5;
+  --accent-glow: rgba(79, 70, 229, 0.16);
+  --accent-light: #6366f1;
+  --green: #0ea5e9;
+  --green-glow: rgba(14, 165, 233, 0.18);
+  --red: #dc2626;
+  --orange: #d97706;
+  --shadow-sm: 0 2px 8px rgba(15, 23, 42, 0.08);
+  --shadow-md: 0 4px 20px rgba(15, 23, 42, 0.10);
+  --shadow-lg: 0 8px 40px rgba(15, 23, 42, 0.12);
+}
+
 *, *::before, *::after {
   box-sizing: border-box;
   margin: 0;
@@ -42,6 +64,7 @@ body {
   min-height: 100vh;
   overflow-x: hidden;
   -webkit-font-smoothing: antialiased;
+  transition: background var(--transition), color var(--transition);
 }
 
 /* ── Ambient Blobs ── */
@@ -67,6 +90,16 @@ body {
   width: 300px; height: 300px;
   top: 50%; left: 40%;
   background: radial-gradient(circle, rgba(108, 92, 231, 0.1), transparent 70%);
+}
+
+body[data-theme="light"] .bg-blob-1 {
+  background: radial-gradient(circle, rgba(99, 102, 241, 0.22), transparent 70%);
+}
+body[data-theme="light"] .bg-blob-2 {
+  background: radial-gradient(circle, rgba(14, 165, 233, 0.18), transparent 70%);
+}
+body[data-theme="light"] .bg-blob-3 {
+  background: radial-gradient(circle, rgba(79, 70, 229, 0.12), transparent 70%);
 }
 
 /* ── App Container ── */
@@ -116,6 +149,10 @@ body {
   font-weight: 500;
 }
 .top-bar-right { display: flex; align-items: center; gap: 12px; }
+
+.theme-toggle-btn {
+  min-width: 94px;
+}
 
 .status-chip {
   display: flex;
@@ -205,6 +242,9 @@ body {
   background: rgba(0, 0, 0, 0.2);
   padding: 3px;
   border-radius: var(--radius-sm);
+}
+body[data-theme="light"] .tab-group {
+  background: rgba(15, 23, 42, 0.06);
 }
 .tab-btn {
   flex: 1;
@@ -370,6 +410,9 @@ body {
   background: rgba(255,255,255,0.03);
   border: 1px solid var(--glass-border);
 }
+body[data-theme="light"] .live-indicator {
+  background: rgba(15, 23, 42, 0.04);
+}
 .live-indicator.active {
   color: var(--red);
   border-color: rgba(255, 107, 107, 0.3);
@@ -396,6 +439,9 @@ body {
   background: rgba(0, 0, 0, 0.3);
   border: 1px solid var(--glass-border);
   min-height: 420px;
+}
+body[data-theme="light"] .video-container {
+  background: rgba(255, 255, 255, 0.72);
 }
 #streamView {
   width: 100%;
@@ -473,6 +519,9 @@ body {
   min-height: 200px;
   max-height: calc(100vh - 380px);
 }
+body[data-theme="light"] .log-box {
+  background: rgba(255, 255, 255, 0.7);
+}
 .log-box::-webkit-scrollbar { width: 5px; }
 .log-box::-webkit-scrollbar-track { background: transparent; }
 .log-box::-webkit-scrollbar-thumb {
@@ -490,6 +539,9 @@ body {
   line-height: 1.6;
   color: var(--text-secondary);
   transition: var(--transition);
+}
+body[data-theme="light"] .log-item {
+  background: rgba(255, 255, 255, 0.88);
 }
 .log-item.latest {
   border-color: rgba(108, 92, 231, 0.2);

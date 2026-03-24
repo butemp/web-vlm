@@ -7,6 +7,7 @@ const state = {
   runId: null,
   sourceType: "upload",
   mode: "infer",
+  theme: "dark",
   defaultPrompt: "",
   eventSource: null,
   activeLogNode: null,
@@ -40,6 +41,7 @@ const el = {
   liveIndicator: document.getElementById("liveIndicator"),
   fileDrop: document.getElementById("fileDrop"),
   fileDropText: document.getElementById("fileDropText"),
+  themeToggleBtn: document.getElementById("themeToggleBtn"),
 };
 
 /* ── Helpers ── */
@@ -50,6 +52,23 @@ function setStatus(text, active = false) {
 
 function setLive(active) {
   el.liveIndicator.classList.toggle("active", active);
+}
+
+function applyTheme(theme) {
+  state.theme = theme === "light" ? "light" : "dark";
+  document.body.dataset.theme = state.theme;
+  try {
+    localStorage.setItem("web_vlm_theme", state.theme);
+  } catch {
+    // ignore
+  }
+  if (el.themeToggleBtn) {
+    el.themeToggleBtn.textContent = state.theme === "dark" ? "切换浅色" : "切换深色";
+  }
+}
+
+function toggleTheme() {
+  applyTheme(state.theme === "dark" ? "light" : "dark");
 }
 
 function clearLogs() {
@@ -312,6 +331,13 @@ async function boot() {
   }
 
   el.promptInput.value = state.defaultPrompt;
+  let preferredTheme = "dark";
+  try {
+    preferredTheme = localStorage.getItem("web_vlm_theme") || "dark";
+  } catch {
+    preferredTheme = "dark";
+  }
+  applyTheme(preferredTheme);
   updateSourceTypeUI();
   updateModeUI();
   el.startBtn.disabled = true;
@@ -371,6 +397,12 @@ el.resetPromptBtn.addEventListener("click", () => {
   el.promptInput.value = state.defaultPrompt;
   addLog("→ Prompt 已恢复默认", true);
 });
+
+if (el.themeToggleBtn) {
+  el.themeToggleBtn.addEventListener("click", () => {
+    toggleTheme();
+  });
+}
 
 /* ── Drag & Drop ── */
 el.fileDrop.addEventListener("dragover", (e) => {

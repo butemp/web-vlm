@@ -64,11 +64,17 @@ http://127.0.0.1:8000
 - `QWEN_MODEL_PATH`：Qwen2.5-VL-3B 模型目录
 - `YOLO_MODEL_PATH`：YOLO 权重文件（`.pt`）
 - `GPU_DEVICE`：GPU 设备（默认 `cuda:0`）
-- `STREAM_MAX_EDGE`：播放输出最大边（默认 1280，越小越流畅）
-- `QWEN_MAX_IMAGE_EDGE`：Qwen 输入最大边（默认 768，越小越快）
-- `YOLO_STREAM_IMGSZ`：检测输入尺寸（默认 512，越小越快）
+- `STREAM_MAX_EDGE`：播放输出最大边（默认 960，越小越流畅）
+- `STREAM_TARGET_FPS`：播放目标帧率（默认 18）
+- `QWEN_MAX_IMAGE_EDGE`：Qwen 输入最大边（默认 640，越小越快）
+- `YOLO_STREAM_IMGSZ`：检测输入尺寸（默认 416，越小越快）
+- `PRELOAD_QWEN_ON_STARTUP`：服务启动时预加载 Qwen（默认 `True`）
 
 当前代码要求使用 GPU；若无 CUDA 会报错。
+
+## 前端主题
+
+页面右上角支持一键切换浅色/深色主题，主题选择会保存在浏览器本地。
 
 ## 接口说明（核心）
 
