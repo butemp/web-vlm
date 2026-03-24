@@ -2,8 +2,8 @@
 
 一个前后端一体化的在线视频推理 demo，支持两种模式：
 
-- `Qwen 实时推理`：对视频流按时间采样帧，进行流式文本输出（当前为模拟推理，可替换为 Qwen2.5-VL-3B）。
-- `YOLO 实时检测`：对视频流实时生成检测框与检测日志（当前为模拟检测，可替换为 YOLOv8）。
+- `Qwen 实时推理`：对视频流按时间采样帧，调用 `Qwen2.5-VL-3B` 输出流式文本。
+- `YOLO 实时检测`：对视频流实时调用 `YOLO` 进行目标检测并绘制 box。
 
 支持两类视频输入：
 
@@ -40,6 +40,8 @@ web_vlm/
 cd web_vlm
 conda create -n web_vlm python=3.10 -y
 conda activate web_vlm
+# 先安装与你服务器 CUDA 匹配的 torch（示例，按你的 CUDA 版本调整）
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
 ```
 
@@ -55,11 +57,15 @@ uvicorn app:app --host 0.0.0.0 --port 8000 --reload
 http://127.0.0.1:8000
 ```
 
-## 如何替换为真实模型
+## 模型路径（硬编码）
 
-- 替换 `app.py` 中 `_mock_caption(...)` 为真实 Qwen2.5-VL-3B 推理函数（输入单帧 + prompt，输出文本）。
-- 替换 `_mock_detect(...)` 为 YOLOv8 推理函数（输入帧，输出 `label/conf/xyxy`）。
-- 保持当前 API 不变，前端无需改动。
+在 `app.py` 顶部直接修改：
+
+- `QWEN_MODEL_PATH`：Qwen2.5-VL-3B 模型目录
+- `YOLO_MODEL_PATH`：YOLO 权重文件（`.pt`）
+- `GPU_DEVICE`：GPU 设备（默认 `cuda:0`）
+
+当前代码要求使用 GPU；若无 CUDA 会报错。
 
 ## 接口说明（核心）
 

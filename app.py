@@ -1,10 +1,12 @@
 import asyncio
 import json
 import logging
+import os
+import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import cv2
 import numpy as np
@@ -12,8 +14,19 @@ from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from PIL import Image
 
 logger = logging.getLogger("web_vlm")
+
+try:
+    import torch
+    from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+    from ultralytics import YOLO
+except Exception:
+    torch = None
+    AutoProcessor = None
+    Qwen2_5_VLForConditionalGeneration = None
+    YOLO = None
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -22,6 +35,26 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 DEFAULT_PROMPT = "请简单描述一下这个视频"
 MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500 MB
+
+# ---------------------------------------------------------------------------
+# Hardcoded model paths (edit here before deploying).
+# ---------------------------------------------------------------------------
+QWEN_MODEL_PATH = "/data/models/Qwen2.5-VL-3B-Instruct"
+YOLO_MODEL_PATH = "/data/models/yolov8x.pt"
+
+GPU_DEVICE = "cuda:0"
+QWEN_MAX_NEW_TOKENS = 96
+QWEN_MAX_IMAGE_EDGE = 1024
+YOLO_CONF = 0.25
+YOLO_IMGSZ = 960
+YOLO_DRAW_EVERY_N_FRAMES = 2
+
+# Runtime model cache
+_qwen_lock = threading.Lock()
+_yolo_lock = threading.Lock()
+_qwen_model = None
+_qwen_processor = None
+_yolo_model = None
 
 app = FastAPI(title="Realtime Video Inference Demo", version="0.2.0")
 app.add_middleware(
@@ -60,62 +93,175 @@ def _safe_filename(name: str) -> str:
     return name
 
 
-def _frame_signature(frame: np.ndarray) -> Tuple[float, float, float]:
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    brightness = float(np.mean(hsv[:, :, 2]))
-    saturation = float(np.mean(hsv[:, :, 1]))
-    hue = float(np.mean(hsv[:, :, 0]))
-    return brightness, saturation, hue
+def _require_runtime_deps() -> None:
+    if torch is None or AutoProcessor is None or YOLO is None:
+        raise RuntimeError(
+            "缺少推理依赖，请安装 torch/transformers/ultralytics/Pillow 后重启服务。"
+        )
 
 
-def _mock_caption(frame: np.ndarray, prompt: str, frame_idx: int) -> str:
-    brightness, saturation, hue = _frame_signature(frame)
-
-    if brightness > 170:
-        light_desc = "画面较明亮"
-    elif brightness > 110:
-        light_desc = "亮度中等"
-    else:
-        light_desc = "画面偏暗"
-
-    if saturation > 120:
-        color_desc = "色彩饱和度较高"
-    elif saturation > 70:
-        color_desc = "色彩自然"
-    else:
-        color_desc = "色彩较淡"
-
-    if hue < 50:
-        tone_desc = "整体偏暖色调"
-    elif hue < 100:
-        tone_desc = "整体偏中性色调"
-    else:
-        tone_desc = "整体偏冷色调"
-
-    return (
-        f"[模拟Qwen2.5-VL-3B][帧{frame_idx}] 针对提示词\u201c{prompt}\u201d："
-        f"当前{light_desc}，{color_desc}，{tone_desc}，"
-        f"场景看起来在持续变化。"
-    )
+def _require_gpu() -> None:
+    if torch is None or (not torch.cuda.is_available()):
+        raise RuntimeError("未检测到 CUDA GPU，当前配置要求使用 GPU 推理。")
 
 
-def _mock_detect(
-    frame: np.ndarray,
-    frame_idx: int,
-    targets: List[str],
-) -> List[Dict[str, object]]:
+def _ensure_qwen_loaded():
+    global _qwen_model, _qwen_processor
+    if _qwen_model is not None and _qwen_processor is not None:
+        return _qwen_model, _qwen_processor
+
+    with _qwen_lock:
+        if _qwen_model is not None and _qwen_processor is not None:
+            return _qwen_model, _qwen_processor
+
+        _require_runtime_deps()
+        _require_gpu()
+
+        if not os.path.exists(QWEN_MODEL_PATH):
+            raise RuntimeError(f"Qwen 模型路径不存在: {QWEN_MODEL_PATH}")
+
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        logger.info("开始加载 Qwen 模型: %s", QWEN_MODEL_PATH)
+        _qwen_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            QWEN_MODEL_PATH,
+            torch_dtype=dtype,
+            device_map="auto",
+        )
+        _qwen_model.eval()
+        _qwen_processor = AutoProcessor.from_pretrained(QWEN_MODEL_PATH)
+        logger.info("Qwen 模型加载完成")
+
+    return _qwen_model, _qwen_processor
+
+
+def _ensure_yolo_loaded():
+    global _yolo_model
+    if _yolo_model is not None:
+        return _yolo_model
+
+    with _yolo_lock:
+        if _yolo_model is not None:
+            return _yolo_model
+
+        _require_runtime_deps()
+        _require_gpu()
+
+        if not os.path.exists(YOLO_MODEL_PATH):
+            raise RuntimeError(f"YOLO 模型路径不存在: {YOLO_MODEL_PATH}")
+
+        logger.info("开始加载 YOLO 模型: %s", YOLO_MODEL_PATH)
+        _yolo_model = YOLO(YOLO_MODEL_PATH)
+        logger.info("YOLO 模型加载完成")
+
+    return _yolo_model
+
+
+def _resize_for_vlm(frame: np.ndarray, max_edge: int = QWEN_MAX_IMAGE_EDGE) -> np.ndarray:
     h, w = frame.shape[:2]
-    labels = [t.strip() for t in targets if t.strip()] or ["person", "car", "bicycle"]
+    longest = max(h, w)
+    if longest <= max_edge:
+        return frame
+
+    scale = max_edge / float(longest)
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+    return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+
+def _qwen_caption(frame: np.ndarray, prompt: str) -> str:
+    model, processor = _ensure_qwen_loaded()
+    frame = _resize_for_vlm(frame)
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    image = Image.fromarray(rgb)
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": prompt},
+            ],
+        }
+    ]
+
+    with _qwen_lock:
+        model_inputs = processor.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+            return_dict=True,
+        )
+        model_inputs = model_inputs.to(model.device)
+
+        with torch.inference_mode():
+            generated_ids = model.generate(
+                **model_inputs,
+                max_new_tokens=QWEN_MAX_NEW_TOKENS,
+                do_sample=False,
+            )
+
+    input_ids = model_inputs["input_ids"]
+    generated_trimmed = [
+        out_ids[len(in_ids) :]
+        for in_ids, out_ids in zip(input_ids, generated_ids)
+    ]
+    text = processor.batch_decode(
+        generated_trimmed,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )[0].strip()
+    return text or "未生成有效文本。"
+
+
+def _extract_yolo_name(names: object, cls_id: int) -> str:
+    if isinstance(names, dict):
+        return str(names.get(cls_id, cls_id))
+    if isinstance(names, list) and 0 <= cls_id < len(names):
+        return str(names[cls_id])
+    return str(cls_id)
+
+
+def _yolo_detect(frame: np.ndarray, targets: List[str]) -> List[Dict[str, object]]:
+    model = _ensure_yolo_loaded()
+    target_set = {x.lower().strip() for x in targets if x.strip()}
+
+    with _yolo_lock:
+        results = model.predict(
+            source=frame,
+            conf=YOLO_CONF,
+            imgsz=YOLO_IMGSZ,
+            device=GPU_DEVICE,
+            verbose=False,
+        )
+
+    if not results:
+        return []
+
+    result = results[0]
+    boxes = result.boxes
+    names = result.names
+    if boxes is None:
+        return []
 
     detections: List[Dict[str, object]] = []
-    for i, label in enumerate(labels[:5]):
-        box_w = max(80, int(w * (0.12 + 0.02 * (i % 3))))
-        box_h = max(60, int(h * (0.18 + 0.03 * (i % 2))))
-        x = int((frame_idx * (11 + i * 3) + i * 137) % max(1, (w - box_w)))
-        y = int((frame_idx * (7 + i * 2) + i * 91) % max(1, (h - box_h)))
-        conf = round(0.55 + ((frame_idx + i * 13) % 35) / 100, 2)
-        detections.append({"label": label, "conf": conf, "xyxy": [x, y, x + box_w, y + box_h]})
+    for box in boxes:
+        cls_id = int(box.cls.item())
+        label = _extract_yolo_name(names, cls_id)
+        if target_set and label.lower() not in target_set:
+            continue
 
+        conf = float(box.conf.item())
+        x1, y1, x2, y2 = [int(v) for v in box.xyxy[0].tolist()]
+        detections.append(
+            {
+                "label": label,
+                "conf": conf,
+                "xyxy": [x1, y1, x2, y2],
+            }
+        )
+
+    detections.sort(key=lambda x: x["conf"], reverse=True)
     return detections
 
 
@@ -242,6 +388,7 @@ async def video_stream(
             fps = 15.0
         delay = 1.0 / min(20.0, max(8.0, fps))
         frame_idx = 0
+        last_dets: List[Dict[str, object]] = []
         max_loop_retries = 3
         retry_count = 0
 
@@ -260,8 +407,16 @@ async def video_stream(
                 retry_count = 0
                 frame_idx += 1
                 if mode == "detect":
-                    dets = _mock_detect(frame, frame_idx, target_list)
-                    frame = _draw_detections(frame, dets)
+                    if frame_idx % YOLO_DRAW_EVERY_N_FRAMES == 0:
+                        try:
+                            dets = await loop.run_in_executor(
+                                None, _yolo_detect, frame.copy(), target_list
+                            )
+                            last_dets = dets
+                        except Exception as exc:
+                            logger.exception("YOLO 检测失败: %s", exc)
+                            last_dets = []
+                    frame = _draw_detections(frame, last_dets)
 
                 ok, encoded = cv2.imencode(
                     ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82]
@@ -334,7 +489,17 @@ async def infer_stream(
                     await asyncio.sleep(0.01)
                     continue
 
-                text = _mock_caption(frame, prompt, frame_idx)
+                try:
+                    text = await loop.run_in_executor(
+                        None, _qwen_caption, frame.copy(), prompt
+                    )
+                except Exception as exc:
+                    logger.exception("Qwen 推理失败: %s", exc)
+                    yield (
+                        f"data: {json.dumps({'type': 'error', 'text': f'Qwen 推理失败: {exc}'}, ensure_ascii=False)}\n\n"
+                    )
+                    await asyncio.sleep(0.4)
+                    continue
                 yield f"data: {json.dumps({'type': 'start', 'text': '', 'frame': frame_idx}, ensure_ascii=False)}\n\n"
 
                 for piece in text.split("，"):
@@ -409,11 +574,24 @@ async def detect_stream(
                     await asyncio.sleep(0.01)
                     continue
 
-                dets = _mock_detect(frame, frame_idx, target_list)
-                summary = ", ".join(
-                    [f"{d['label']}({d['conf']:.2f})" for d in dets]
-                )
-                message = f"[帧{frame_idx}] 检测到: {summary}"
+                try:
+                    dets = await loop.run_in_executor(
+                        None, _yolo_detect, frame.copy(), target_list
+                    )
+                except Exception as exc:
+                    logger.exception("YOLO 检测失败: %s", exc)
+                    yield (
+                        f"data: {json.dumps({'type': 'error', 'text': f'YOLO 检测失败: {exc}'}, ensure_ascii=False)}\n\n"
+                    )
+                    await asyncio.sleep(0.3)
+                    continue
+                if dets:
+                    summary = ", ".join(
+                        [f"{d['label']}({d['conf']:.2f})" for d in dets]
+                    )
+                    message = f"[帧{frame_idx}] 检测到: {summary}"
+                else:
+                    message = f"[帧{frame_idx}] 未检测到目标"
                 yield (
                     f"data: {json.dumps({'type': 'detect', 'text': message, 'frame': frame_idx, 'count': len(dets)}, ensure_ascii=False)}\n\n"
                 )
