@@ -4,6 +4,7 @@
 
 const state = {
   sourceId: null,
+  runId: null,
   sourceType: "upload",
   mode: "infer",
   defaultPrompt: "",
@@ -110,11 +111,28 @@ function updateModeUI() {
 }
 
 /* ── Core Actions ── */
-function stopAnalysis() {
+async function stopAnalysis(notifyBackend = true) {
+  const sourceId = state.sourceId;
+  const runId = state.runId;
+
   if (state.eventSource) {
     state.eventSource.close();
     state.eventSource = null;
   }
+
+  if (notifyBackend && sourceId && runId) {
+    try {
+      await fetch("/api/control/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source_id: sourceId, run_id: runId }),
+      });
+    } catch (e) {
+      console.warn("stop control failed:", e);
+    }
+  }
+
+  state.runId = null;
   el.streamView.removeAttribute("src");
   el.streamView.style.display = "none";
   el.streamPlaceholder.style.display = "flex";
@@ -125,21 +143,31 @@ function stopAnalysis() {
   setLive(false);
 }
 
-function startVideoStream() {
+async function startVideoStream() {
   if (!state.sourceId) {
     addLog("⚠ 请先上传视频或输入流 URL");
     return;
   }
 
-  if (state.eventSource) {
-    state.eventSource.close();
-    state.eventSource = null;
+  if (state.runId || state.eventSource) {
+    await stopAnalysis(true);
   }
+
+  const startResp = await fetch("/api/control/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ source_id: state.sourceId }),
+  });
+  const startData = await startResp.json();
+  if (!startResp.ok) {
+    throw new Error(startData.detail || "启动分析会话失败");
+  }
+  state.runId = startData.run_id;
 
   clearLogs();
 
   const targets = encodeURIComponent(el.targetInput.value.trim());
-  const streamUrl = `/api/stream/${state.sourceId}?mode=${state.mode}&targets=${targets}&t=${Date.now()}`;
+  const streamUrl = `/api/stream/${state.sourceId}?run_id=${encodeURIComponent(state.runId)}&mode=${state.mode}&targets=${targets}&t=${Date.now()}`;
   el.streamView.src = streamUrl;
   el.streamView.style.display = "block";
   el.streamPlaceholder.style.display = "none";
@@ -150,7 +178,7 @@ function startVideoStream() {
   if (state.mode === "infer") {
     const prompt = encodeURIComponent(el.promptInput.value.trim() || state.defaultPrompt);
     state.eventSource = new EventSource(
-      `/api/infer/stream?source_id=${state.sourceId}&prompt=${prompt}`
+      `/api/infer/stream?source_id=${state.sourceId}&run_id=${encodeURIComponent(state.runId)}&prompt=${prompt}`
     );
     state.eventSource.onmessage = (evt) => {
       try {
@@ -170,17 +198,20 @@ function startVideoStream() {
       addLog("⚠ 推理流连接中断，请重新点击「开始分析」", true);
       setStatus("推理流中断", false);
       setLive(false);
+      state.runId = null;
       el.startBtn.disabled = false;
       el.stopBtn.disabled = true;
     };
   } else {
     state.eventSource = new EventSource(
-      `/api/detect/stream?source_id=${state.sourceId}&targets=${encodeURIComponent(el.targetInput.value.trim())}`
+      `/api/detect/stream?source_id=${state.sourceId}&run_id=${encodeURIComponent(state.runId)}&targets=${encodeURIComponent(el.targetInput.value.trim())}`
     );
     state.eventSource.onmessage = (evt) => {
       try {
         const payload = JSON.parse(evt.data);
-        addLog(payload.text, true);
+        if (payload.type === "detect") {
+          addLog(payload.text, true);
+        }
       } catch (e) {
         console.error("SSE parse error:", e);
       }
@@ -189,6 +220,7 @@ function startVideoStream() {
       addLog("⚠ 检测流连接中断，请重新点击「开始分析」", true);
       setStatus("检测流中断", false);
       setLive(false);
+      state.runId = null;
       el.startBtn.disabled = false;
       el.stopBtn.disabled = true;
     };
@@ -201,6 +233,10 @@ function startVideoStream() {
 }
 
 async function uploadVideo() {
+  if (state.runId || state.eventSource) {
+    await stopAnalysis(true);
+  }
+
   const file = el.videoFile.files?.[0];
   if (!file) {
     addLog("⚠ 请先选择视频文件");
@@ -232,6 +268,10 @@ async function uploadVideo() {
 }
 
 async function registerUrl() {
+  if (state.runId || state.eventSource) {
+    await stopAnalysis(true);
+  }
+
   const url = el.streamUrl.value.trim();
   if (!url) {
     addLog("⚠ 请输入流媒体 URL");
@@ -288,9 +328,13 @@ el.sourceTypeSeg.addEventListener("click", (e) => {
   updateSourceTypeUI();
 });
 
-el.modeSeg.addEventListener("click", (e) => {
+el.modeSeg.addEventListener("click", async (e) => {
   const btn = e.target.closest("button[data-mode]");
   if (!btn) return;
+
+  if (state.runId || state.eventSource) {
+    await stopAnalysis(true);
+  }
   state.mode = btn.dataset.mode;
   updateModeUI();
   clearLogs();
@@ -307,18 +351,20 @@ el.urlBtn.addEventListener("click", async () => {
   catch (err) { addLog(`❌ 连接失败: ${err.message}`, true); setStatus("连接失败", false); }
 });
 
-el.startBtn.addEventListener("click", () => {
-  try { startVideoStream(); }
+el.startBtn.addEventListener("click", async () => {
+  try { await startVideoStream(); }
   catch (err) { addLog(`❌ 启动失败: ${err.message}`, true); setStatus("启动失败", false); }
 });
 
-el.stopBtn.addEventListener("click", () => stopAnalysis());
+el.stopBtn.addEventListener("click", async () => {
+  await stopAnalysis(true);
+});
 
-el.applyPromptBtn.addEventListener("click", () => {
+el.applyPromptBtn.addEventListener("click", async () => {
   if (state.mode !== "infer") return;
   if (!state.sourceId) { addLog("⚠ 请先接入视频源", true); return; }
   addLog("→ 已应用新 Prompt，重新开始流式推理...", true);
-  startVideoStream();
+  await startVideoStream();
 });
 
 el.resetPromptBtn.addEventListener("click", () => {
@@ -350,6 +396,19 @@ el.videoFile.addEventListener("change", () => {
 
 window.addEventListener("beforeunload", () => {
   if (state.eventSource) state.eventSource.close();
+  if (state.sourceId && state.runId) {
+    try {
+      navigator.sendBeacon(
+        "/api/control/stop",
+        new Blob(
+          [JSON.stringify({ source_id: state.sourceId, run_id: state.runId })],
+          { type: "application/json" }
+        )
+      );
+    } catch {
+      // ignore
+    }
+  }
 });
 
 boot().catch((err) => {

@@ -64,6 +64,9 @@ http://127.0.0.1:8000
 - `QWEN_MODEL_PATH`：Qwen2.5-VL-3B 模型目录
 - `YOLO_MODEL_PATH`：YOLO 权重文件（`.pt`）
 - `GPU_DEVICE`：GPU 设备（默认 `cuda:0`）
+- `STREAM_MAX_EDGE`：播放输出最大边（默认 1280，越小越流畅）
+- `QWEN_MAX_IMAGE_EDGE`：Qwen 输入最大边（默认 768，越小越快）
+- `YOLO_STREAM_IMGSZ`：检测输入尺寸（默认 512，越小越快）
 
 当前代码要求使用 GPU；若无 CUDA 会报错。
 
@@ -71,6 +74,8 @@ http://127.0.0.1:8000
 
 - `POST /api/source/upload`：上传视频
 - `POST /api/source/url`：注册在线视频 URL
-- `GET /api/stream/{source_id}?mode=infer|detect&targets=...`：视频 MJPEG 流
-- `GET /api/infer/stream?source_id=...&prompt=...`：推理 SSE 流式输出
-- `GET /api/detect/stream?source_id=...&targets=...`：检测 SSE 事件流
+- `POST /api/control/start`：启动分析会话（返回 `run_id`）
+- `POST /api/control/stop`：停止分析会话
+- `GET /api/stream/{source_id}?run_id=...&mode=infer|detect&targets=...`：视频 MJPEG 流
+- `GET /api/infer/stream?source_id=...&run_id=...&prompt=...`：推理 SSE 流式输出
+- `GET /api/detect/stream?source_id=...&run_id=...&targets=...`：检测 SSE 事件流

@@ -20,12 +20,19 @@ logger = logging.getLogger("web_vlm")
 
 try:
     import torch
-    from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+    from transformers import (
+        AutoProcessor,
+        Qwen2_5_VLForConditionalGeneration,
+        StoppingCriteria,
+        StoppingCriteriaList,
+    )
     from ultralytics import YOLO
 except Exception:
     torch = None
     AutoProcessor = None
     Qwen2_5_VLForConditionalGeneration = None
+    StoppingCriteria = None
+    StoppingCriteriaList = None
     YOLO = None
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -44,10 +51,14 @@ YOLO_MODEL_PATH = "/data/models/yolov8x.pt"
 
 GPU_DEVICE = "cuda:0"
 QWEN_MAX_NEW_TOKENS = 96
-QWEN_MAX_IMAGE_EDGE = 1024
+QWEN_MAX_IMAGE_EDGE = 768
 YOLO_CONF = 0.25
-YOLO_IMGSZ = 960
+YOLO_IMGSZ = 640
+YOLO_STREAM_IMGSZ = 512
 YOLO_DRAW_EVERY_N_FRAMES = 2
+YOLO_STREAM_INFER_INTERVAL_SEC = 0.35
+STREAM_MAX_EDGE = 1280
+STREAM_JPEG_QUALITY = 76
 
 # Runtime model cache
 _qwen_lock = threading.Lock()
@@ -55,6 +66,14 @@ _yolo_lock = threading.Lock()
 _qwen_model = None
 _qwen_processor = None
 _yolo_model = None
+
+# Shared detection cache to avoid duplicate YOLO inference between video stream
+# and detect SSE stream.
+_detect_cache_lock = threading.Lock()
+_detect_cache: Dict[str, Dict[str, object]] = {}
+
+_active_runs_lock = threading.Lock()
+_active_runs: Dict[str, str] = {}
 
 app = FastAPI(title="Realtime Video Inference Demo", version="0.2.0")
 app.add_middleware(
@@ -93,8 +112,42 @@ def _safe_filename(name: str) -> str:
     return name
 
 
+def _start_run(source_id: str) -> str:
+    run_id = str(uuid.uuid4())
+    with _active_runs_lock:
+        _active_runs[source_id] = run_id
+    return run_id
+
+
+def _is_run_active(source_id: str, run_id: str) -> bool:
+    with _active_runs_lock:
+        return _active_runs.get(source_id) == run_id
+
+
+def _stop_run(source_id: str, run_id: str = "") -> bool:
+    with _active_runs_lock:
+        current = _active_runs.get(source_id)
+        if current is None:
+            return False
+        if run_id and current != run_id:
+            return False
+        _active_runs.pop(source_id, None)
+        return True
+
+
+def _clear_detect_cache(source_id: str) -> None:
+    with _detect_cache_lock:
+        _detect_cache.pop(source_id, None)
+
+
 def _require_runtime_deps() -> None:
-    if torch is None or AutoProcessor is None or YOLO is None:
+    if (
+        torch is None
+        or AutoProcessor is None
+        or YOLO is None
+        or StoppingCriteria is None
+        or StoppingCriteriaList is None
+    ):
         raise RuntimeError(
             "缺少推理依赖，请安装 torch/transformers/ultralytics/Pillow 后重启服务。"
         )
@@ -156,7 +209,7 @@ def _ensure_yolo_loaded():
     return _yolo_model
 
 
-def _resize_for_vlm(frame: np.ndarray, max_edge: int = QWEN_MAX_IMAGE_EDGE) -> np.ndarray:
+def _resize_by_max_edge(frame: np.ndarray, max_edge: int) -> np.ndarray:
     h, w = frame.shape[:2]
     longest = max(h, w)
     if longest <= max_edge:
@@ -168,7 +221,23 @@ def _resize_for_vlm(frame: np.ndarray, max_edge: int = QWEN_MAX_IMAGE_EDGE) -> n
     return cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
 
-def _qwen_caption(frame: np.ndarray, prompt: str) -> str:
+def _resize_for_vlm(frame: np.ndarray, max_edge: int = QWEN_MAX_IMAGE_EDGE) -> np.ndarray:
+    return _resize_by_max_edge(frame, max_edge=max_edge)
+
+
+_RunStopBase = StoppingCriteria if StoppingCriteria is not None else object
+
+
+class _RunStopCriteria(_RunStopBase):
+    def __init__(self, source_id: str, run_id: str):
+        self.source_id = source_id
+        self.run_id = run_id
+
+    def __call__(self, input_ids, scores, **kwargs) -> bool:
+        return not _is_run_active(self.source_id, self.run_id)
+
+
+def _qwen_caption(frame: np.ndarray, prompt: str, source_id: str, run_id: str) -> str:
     model, processor = _ensure_qwen_loaded()
     frame = _resize_for_vlm(frame)
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -199,6 +268,9 @@ def _qwen_caption(frame: np.ndarray, prompt: str) -> str:
                 **model_inputs,
                 max_new_tokens=QWEN_MAX_NEW_TOKENS,
                 do_sample=False,
+                stopping_criteria=StoppingCriteriaList(
+                    [_RunStopCriteria(source_id, run_id)]
+                ),
             )
 
     input_ids = model_inputs["input_ids"]
@@ -222,7 +294,11 @@ def _extract_yolo_name(names: object, cls_id: int) -> str:
     return str(cls_id)
 
 
-def _yolo_detect(frame: np.ndarray, targets: List[str]) -> List[Dict[str, object]]:
+def _yolo_detect(
+    frame: np.ndarray,
+    targets: List[str],
+    imgsz: int = YOLO_IMGSZ,
+) -> List[Dict[str, object]]:
     model = _ensure_yolo_loaded()
     target_set = {x.lower().strip() for x in targets if x.strip()}
 
@@ -230,7 +306,7 @@ def _yolo_detect(frame: np.ndarray, targets: List[str]) -> List[Dict[str, object
         results = model.predict(
             source=frame,
             conf=YOLO_CONF,
-            imgsz=YOLO_IMGSZ,
+            imgsz=imgsz,
             device=GPU_DEVICE,
             verbose=False,
         )
@@ -364,14 +440,53 @@ async def register_url(payload: Dict[str, str]) -> JSONResponse:
     )
 
 
+@app.post("/api/control/start")
+async def control_start(payload: Dict[str, str]) -> JSONResponse:
+    source_id = (payload.get("source_id") or "").strip()
+    if not source_id or source_id not in SOURCES:
+        raise HTTPException(status_code=404, detail="source_id 不存在")
+
+    run_id = _start_run(source_id)
+    _clear_detect_cache(source_id)
+    return JSONResponse(
+        {
+            "source_id": source_id,
+            "run_id": run_id,
+            "message": "分析会话已启动",
+        }
+    )
+
+
+@app.post("/api/control/stop")
+async def control_stop(payload: Dict[str, str]) -> JSONResponse:
+    source_id = (payload.get("source_id") or "").strip()
+    run_id = (payload.get("run_id") or "").strip()
+    if not source_id:
+        raise HTTPException(status_code=400, detail="source_id 不能为空")
+
+    stopped = _stop_run(source_id, run_id=run_id)
+    _clear_detect_cache(source_id)
+    return JSONResponse(
+        {
+            "source_id": source_id,
+            "run_id": run_id,
+            "stopped": stopped,
+            "message": "已请求停止",
+        }
+    )
+
+
 @app.get("/api/stream/{source_id}")
 async def video_stream(
     source_id: str,
+    run_id: str = Query(...),
     mode: str = Query("infer", pattern="^(infer|detect)$"),
     targets: str = Query(""),
 ):
     if source_id not in SOURCES:
         raise HTTPException(status_code=404, detail="source_id 不存在")
+    if not _is_run_active(source_id, run_id):
+        raise HTTPException(status_code=409, detail="分析会话未激活或已停止")
 
     target_list = [x.strip() for x in targets.split(",") if x.strip()]
 
@@ -389,11 +504,16 @@ async def video_stream(
         delay = 1.0 / min(20.0, max(8.0, fps))
         frame_idx = 0
         last_dets: List[Dict[str, object]] = []
+        detect_future = None
+        detect_future_frame_idx = 0
+        last_detect_submit_ts = 0.0
         max_loop_retries = 3
         retry_count = 0
 
         try:
             while True:
+                if not _is_run_active(source_id, run_id):
+                    break
                 ret, frame = await loop.run_in_executor(None, cap.read)
                 if not ret:
                     if SOURCES.get(source_id, {}).get("kind") == "file":
@@ -406,20 +526,46 @@ async def video_stream(
 
                 retry_count = 0
                 frame_idx += 1
+                display_frame = _resize_by_max_edge(frame, max_edge=STREAM_MAX_EDGE)
                 if mode == "detect":
-                    if frame_idx % YOLO_DRAW_EVERY_N_FRAMES == 0:
+                    if detect_future is not None and detect_future.done():
                         try:
-                            dets = await loop.run_in_executor(
-                                None, _yolo_detect, frame.copy(), target_list
-                            )
-                            last_dets = dets
+                            last_dets = detect_future.result()
+                            with _detect_cache_lock:
+                                _detect_cache[source_id] = {
+                                    "run_id": run_id,
+                                    "frame": detect_future_frame_idx,
+                                    "dets": last_dets,
+                                    "ts": time.time(),
+                                }
                         except Exception as exc:
                             logger.exception("YOLO 检测失败: %s", exc)
                             last_dets = []
-                    frame = _draw_detections(frame, last_dets)
+                        finally:
+                            detect_future = None
+
+                    now = time.monotonic()
+                    if (
+                        detect_future is None
+                        and frame_idx % YOLO_DRAW_EVERY_N_FRAMES == 0
+                        and (now - last_detect_submit_ts) >= YOLO_STREAM_INFER_INTERVAL_SEC
+                    ):
+                        detect_future_frame_idx = frame_idx
+                        detect_future = loop.run_in_executor(
+                            None,
+                            _yolo_detect,
+                            display_frame.copy(),
+                            target_list,
+                            YOLO_STREAM_IMGSZ,
+                        )
+                        last_detect_submit_ts = now
+
+                    display_frame = _draw_detections(display_frame, last_dets)
 
                 ok, encoded = cv2.imencode(
-                    ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82]
+                    ".jpg",
+                    display_frame,
+                    [int(cv2.IMWRITE_JPEG_QUALITY), STREAM_JPEG_QUALITY],
                 )
                 if not ok:
                     continue
@@ -445,10 +591,13 @@ async def video_stream(
 async def infer_stream(
     request: Request,
     source_id: str,
+    run_id: str,
     prompt: str = DEFAULT_PROMPT,
 ):
     if source_id not in SOURCES:
         raise HTTPException(status_code=404, detail="source_id 不存在")
+    if not _is_run_active(source_id, run_id):
+        raise HTTPException(status_code=409, detail="分析会话未激活或已停止")
 
     async def event_gen():
         loop = asyncio.get_event_loop()
@@ -471,6 +620,8 @@ async def infer_stream(
             while True:
                 if await request.is_disconnected():
                     break
+                if not _is_run_active(source_id, run_id):
+                    break
 
                 ret, frame = await loop.run_in_executor(None, cap.read)
                 if not ret:
@@ -489,9 +640,11 @@ async def infer_stream(
                     await asyncio.sleep(0.01)
                     continue
 
+                if not _is_run_active(source_id, run_id):
+                    break
                 try:
                     text = await loop.run_in_executor(
-                        None, _qwen_caption, frame.copy(), prompt
+                        None, _qwen_caption, frame.copy(), prompt, source_id, run_id
                     )
                 except Exception as exc:
                     logger.exception("Qwen 推理失败: %s", exc)
@@ -500,10 +653,12 @@ async def infer_stream(
                     )
                     await asyncio.sleep(0.4)
                     continue
+                if not _is_run_active(source_id, run_id):
+                    break
                 yield f"data: {json.dumps({'type': 'start', 'text': '', 'frame': frame_idx}, ensure_ascii=False)}\n\n"
 
                 for piece in text.split("，"):
-                    if await request.is_disconnected():
+                    if await request.is_disconnected() or (not _is_run_active(source_id, run_id)):
                         return
                     chunk = piece + "，"
                     yield (
@@ -529,62 +684,35 @@ async def infer_stream(
 async def detect_stream(
     request: Request,
     source_id: str,
+    run_id: str,
     targets: str = "",
 ):
     if source_id not in SOURCES:
         raise HTTPException(status_code=404, detail="source_id 不存在")
+    if not _is_run_active(source_id, run_id):
+        raise HTTPException(status_code=409, detail="分析会话未激活或已停止")
 
-    target_list = [x.strip() for x in targets.split(",") if x.strip()]
+    _ = [x.strip() for x in targets.split(",") if x.strip()]
 
     async def event_gen():
-        loop = asyncio.get_event_loop()
-        try:
-            cap = await loop.run_in_executor(None, _open_capture, source_id)
-        except ValueError as exc:
-            yield f"data: {json.dumps({'type': 'error', 'text': str(exc)}, ensure_ascii=False)}\n\n"
-            return
+        last_sent_frame = -1
+        idle_ticks = 0
+        while True:
+            if await request.is_disconnected():
+                break
+            if not _is_run_active(source_id, run_id):
+                break
 
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if not fps or np.isnan(fps) or fps <= 1:
-            fps = 15.0
-        sample_every_n = max(1, int(fps * 1.0))
-        frame_idx = 0
-        max_loop_retries = 3
-        retry_count = 0
+            with _detect_cache_lock:
+                state = _detect_cache.get(source_id)
 
-        try:
-            while True:
-                if await request.is_disconnected():
-                    break
-
-                ret, frame = await loop.run_in_executor(None, cap.read)
-                if not ret:
-                    if SOURCES.get(source_id, {}).get("kind") == "file":
-                        retry_count += 1
-                        if retry_count > max_loop_retries:
-                            break
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                        continue
-                    await asyncio.sleep(0.2)
-                    continue
-
-                retry_count = 0
-                frame_idx += 1
-                if frame_idx % sample_every_n != 0:
-                    await asyncio.sleep(0.01)
-                    continue
-
-                try:
-                    dets = await loop.run_in_executor(
-                        None, _yolo_detect, frame.copy(), target_list
-                    )
-                except Exception as exc:
-                    logger.exception("YOLO 检测失败: %s", exc)
-                    yield (
-                        f"data: {json.dumps({'type': 'error', 'text': f'YOLO 检测失败: {exc}'}, ensure_ascii=False)}\n\n"
-                    )
-                    await asyncio.sleep(0.3)
-                    continue
+            if (
+                state
+                and state.get("run_id") == run_id
+                and state.get("frame", -1) != last_sent_frame
+            ):
+                frame_idx = int(state.get("frame", -1))
+                dets = state.get("dets", [])
                 if dets:
                     summary = ", ".join(
                         [f"{d['label']}({d['conf']:.2f})" for d in dets]
@@ -592,12 +720,20 @@ async def detect_stream(
                     message = f"[帧{frame_idx}] 检测到: {summary}"
                 else:
                     message = f"[帧{frame_idx}] 未检测到目标"
+
                 yield (
                     f"data: {json.dumps({'type': 'detect', 'text': message, 'frame': frame_idx, 'count': len(dets)}, ensure_ascii=False)}\n\n"
                 )
-                await asyncio.sleep(0.12)
-        finally:
-            cap.release()
+                last_sent_frame = frame_idx
+                idle_ticks = 0
+            else:
+                idle_ticks += 1
+                if idle_ticks % 80 == 0:
+                    yield (
+                        f"data: {json.dumps({'type': 'waiting', 'text': '等待检测结果...', 'frame': -1, 'count': 0}, ensure_ascii=False)}\n\n"
+                    )
+
+            await asyncio.sleep(0.08)
 
     return StreamingResponse(
         event_gen(),
