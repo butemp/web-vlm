@@ -2,11 +2,12 @@ import asyncio
 import json
 import logging
 import os
+import queue
 import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import cv2
 import numpy as np
@@ -57,9 +58,9 @@ YOLO_IMGSZ = 640
 YOLO_STREAM_IMGSZ = 416
 YOLO_DRAW_EVERY_N_FRAMES = 3
 YOLO_STREAM_INFER_INTERVAL_SEC = 0.45
-STREAM_MAX_EDGE = 960
-STREAM_JPEG_QUALITY = 70
-STREAM_TARGET_FPS = 18
+STREAM_MAX_EDGE = 720
+STREAM_JPEG_QUALITY = 65
+STREAM_TARGET_FPS = 25
 INFER_CACHE_EVERY_N_FRAMES = 2
 INFER_MIN_INTERVAL_SEC = 1.2
 INFER_CACHE_MAX_AGE_SEC = 2.0
@@ -130,7 +131,12 @@ def _open_capture(source_id: str) -> cv2.VideoCapture:
         cap = cv2.VideoCapture(value, cv2.CAP_ANY)
     if not cap.isOpened():
         raise ValueError(f"无法打开视频源: {value}")
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)
+    # Optimize capture settings for smoother playback
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)
+    # For network streams, set longer timeouts
+    if value.startswith(("http://", "https://", "rtsp://")):
+        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 15000)
+        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 10000)
     return cap
 
 
@@ -178,12 +184,14 @@ def _clear_infer_cache(source_id: str) -> None:
 def _build_ffmpeg_capture_options(url: str) -> str:
     lower = url.lower()
     if lower.startswith("rtsp://"):
-        return "rtsp_transport;tcp|stimeout;10000000"
+        return "rtsp_transport;tcp|stimeout;10000000|fflags;nobuffer|flags;low_delay"
     if ".m3u8" in lower:
-        # HLS stream: keep latency lower and improve reconnect stability.
+        # HLS stream: ultra low latency settings for live streaming
         return (
-            "fflags;nobuffer|flags;low_delay|reconnect;1|"
-            "reconnect_streamed;1|reconnect_delay_max;2|rw_timeout;15000000"
+            "fflags;nobuffer+discardcorrupt|flags;low_delay|"
+            "analyzeduration;500000|probesize;500000|"
+            "reconnect;1|reconnect_streamed;1|reconnect_delay_max;2|"
+            "rw_timeout;15000000|timeout;10000000"
         )
     return ""
 
@@ -271,6 +279,76 @@ def _resize_by_max_edge(frame: np.ndarray, max_edge: int) -> np.ndarray:
 
 def _resize_for_vlm(frame: np.ndarray, max_edge: int = QWEN_MAX_IMAGE_EDGE) -> np.ndarray:
     return _resize_by_max_edge(frame, max_edge=max_edge)
+
+
+class ThreadedFrameReader:
+    """Background thread video reader with frame queue for smooth playback."""
+
+    def __init__(
+        self,
+        cap: cv2.VideoCapture,
+        queue_size: int = 8,
+        skip_frames: int = 0,
+        is_file: bool = False,
+    ):
+        self.cap = cap
+        self.skip_frames = skip_frames
+        self.is_file = is_file
+        self.queue: queue.Queue = queue.Queue(maxsize=queue_size)
+        self.stopped = False
+        self.thread = threading.Thread(target=self._reader_loop, daemon=True)
+        self.thread.start()
+
+    def _reader_loop(self):
+        retry_count = 0
+        max_retries = 3
+        while not self.stopped:
+            if self.queue.full():
+                # Drop oldest frame to keep queue fresh
+                try:
+                    self.queue.get_nowait()
+                except queue.Empty:
+                    pass
+
+            # Skip frames if needed
+            for _ in range(self.skip_frames):
+                if self.stopped:
+                    return
+                if not self.cap.grab():
+                    break
+
+            ret, frame = self.cap.read()
+            if not ret:
+                if self.is_file:
+                    retry_count += 1
+                    if retry_count > max_retries:
+                        self.stopped = True
+                        self.queue.put((False, None))
+                        return
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    continue
+                else:
+                    # Network stream failed, try to continue
+                    time.sleep(0.05)
+                    continue
+
+            retry_count = 0
+            try:
+                self.queue.put((True, frame), timeout=0.1)
+            except queue.Full:
+                pass
+
+    def read(self) -> tuple[bool, Optional[np.ndarray]]:
+        if self.stopped and self.queue.empty():
+            return False, None
+        try:
+            return self.queue.get(timeout=0.5)
+        except queue.Empty:
+            return False, None
+
+    def stop(self):
+        self.stopped = True
+        self.cap.release()
 
 
 def _grab_and_read_frame(cap: cv2.VideoCapture, n_skip: int) -> tuple[bool, np.ndarray]:
@@ -599,6 +677,8 @@ async def video_stream(
 
     async def gen_frames():
         loop = asyncio.get_event_loop()
+        reader: Optional[ThreadedFrameReader] = None
+
         try:
             cap = await loop.run_in_executor(None, _open_capture, source_id)
         except ValueError as exc:
@@ -609,36 +689,37 @@ async def video_stream(
         if not fps or np.isnan(fps) or fps <= 1:
             fps = float(STREAM_TARGET_FPS)
 
-        target_fps = max(4.0, float(STREAM_TARGET_FPS))
-        frame_step = max(1, int(round(fps / target_fps))) if fps > target_fps else 1
+        target_fps = min(float(STREAM_TARGET_FPS), fps)
+        frame_step = max(0, int(round(fps / target_fps)) - 1) if fps > target_fps else 0
         delay = 1.0 / target_fps
+        is_file = SOURCES.get(source_id, {}).get("kind") == "file"
+
+        # Use threaded reader for smoother frame acquisition
+        reader = ThreadedFrameReader(
+            cap,
+            queue_size=10,
+            skip_frames=frame_step,
+            is_file=is_file,
+        )
+
         frame_deadline = time.monotonic()
         frame_idx = 0
         last_dets: List[Dict[str, object]] = []
         detect_future = None
         detect_future_frame_idx = 0
         last_detect_submit_ts = 0.0
-        max_loop_retries = 3
-        retry_count = 0
 
         try:
             while True:
                 if not _is_run_active(source_id, run_id):
                     break
 
-                ret, frame = await loop.run_in_executor(
-                    None, _grab_and_read_frame, cap, frame_step - 1
-                )
-                if not ret:
-                    if SOURCES.get(source_id, {}).get("kind") == "file":
-                        retry_count += 1
-                        if retry_count > max_loop_retries:
-                            break
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                        continue
-                    break
+                ret, frame = reader.read()
+                if not ret or frame is None:
+                    if reader.stopped:
+                        break
+                    continue
 
-                retry_count = 0
                 frame_idx += 1
                 if mode == "infer" and frame_idx % INFER_CACHE_EVERY_N_FRAMES == 0:
                     # Cache the latest frame for infer SSE without blocking stream timing.
@@ -676,10 +757,12 @@ async def video_stream(
                         and (now - last_detect_submit_ts) >= YOLO_STREAM_INFER_INTERVAL_SEC
                     ):
                         detect_future_frame_idx = frame_idx
+                        # Use resized frame for YOLO detection
+                        detect_input = _resize_by_max_edge(frame, max_edge=YOLO_STREAM_IMGSZ)
                         detect_future = loop.run_in_executor(
                             None,
                             _yolo_detect,
-                            display_frame.copy(),
+                            detect_input,
                             target_list,
                             YOLO_STREAM_IMGSZ,
                         )
@@ -708,10 +791,12 @@ async def video_stream(
                 remaining = frame_deadline - time.monotonic()
                 if remaining > 0:
                     await asyncio.sleep(remaining)
-                elif remaining < -1.0:
+                elif remaining < -0.5:
+                    # Reset deadline if we're too far behind
                     frame_deadline = time.monotonic()
         finally:
-            cap.release()
+            if reader:
+                reader.stop()
 
     return StreamingResponse(
         gen_frames(),

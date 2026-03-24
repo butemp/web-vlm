@@ -106,7 +106,6 @@ function stopNativePlayback() {
 
 async function tryStartDirectPlayback() {
   if (!el.streamPlayer) return false;
-  if (state.mode !== "infer") return false;
 
   const sourceKind = state.sourceKind || "";
   const playbackUrl = state.playbackUrl || "";
@@ -115,7 +114,8 @@ async function tryStartDirectPlayback() {
   stopNativePlayback();
   const player = el.streamPlayer;
 
-  if (sourceKind === "file") {
+  // For uploaded files, use native playback in infer mode only
+  if (sourceKind === "file" && state.mode === "infer") {
     player.src = playbackUrl;
     player.style.display = "block";
     try {
@@ -126,6 +126,8 @@ async function tryStartDirectPlayback() {
     return true;
   }
 
+  // For HLS streams, ALWAYS use native playback (both infer and detect modes)
+  // This avoids the slow OpenCV -> MJPEG conversion for H265 streams
   if (sourceKind === "url" && isHlsUrl(playbackUrl)) {
     if (player.canPlayType("application/vnd.apple.mpegurl")) {
       player.src = playbackUrl;
@@ -141,19 +143,28 @@ async function tryStartDirectPlayback() {
     if (window.Hls && window.Hls.isSupported()) {
       const hls = new window.Hls({
         lowLatencyMode: true,
-        backBufferLength: 20,
-        maxBufferLength: 12,
+        backBufferLength: 10,
+        maxBufferLength: 8,
+        maxMaxBufferLength: 15,
         liveSyncDurationCount: 2,
+        liveMaxLatencyDurationCount: 4,
+        liveDurationInfinity: true,
+        enableWorker: true,
+        startLevel: -1,
       });
       hls.loadSource(playbackUrl);
       hls.attachMedia(player);
+      hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
+        player.play().catch(() => {});
+      });
+      // Auto-sync to live edge on buffer stall
+      hls.on(window.Hls.Events.ERROR, (event, data) => {
+        if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
+          hls.recoverMediaError();
+        }
+      });
       state.hls = hls;
       player.style.display = "block";
-      try {
-        await player.play();
-      } catch {
-        // ignore
-      }
       return true;
     }
   }
