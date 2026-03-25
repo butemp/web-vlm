@@ -291,10 +291,12 @@ class ThreadedFrameReader:
         queue_size: int = 8,
         skip_frames: int = 0,
         is_file: bool = False,
+        drop_if_full: bool = True,
     ):
         self.cap = cap
         self.skip_frames = skip_frames
         self.is_file = is_file
+        self.drop_if_full = drop_if_full
         self.queue: queue.Queue = queue.Queue(maxsize=queue_size)
         self.stopped = False
         self.thread = threading.Thread(target=self._reader_loop, daemon=True)
@@ -305,11 +307,16 @@ class ThreadedFrameReader:
         max_retries = 3
         while not self.stopped:
             if self.queue.full():
-                # Drop oldest frame to keep queue fresh
-                try:
-                    self.queue.get_nowait()
-                except queue.Empty:
-                    pass
+                if self.drop_if_full:
+                    # Live streams prefer low latency: drop oldest frame when backlogged.
+                    try:
+                        self.queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                else:
+                    # File playback prefers stable speed: apply backpressure and do not drop.
+                    time.sleep(0.002)
+                    continue
 
             # Skip frames if needed
             for _ in range(self.skip_frames):
@@ -324,7 +331,7 @@ class ThreadedFrameReader:
                     retry_count += 1
                     if retry_count > max_retries:
                         self.stopped = True
-                        self.queue.put((False, None))
+                        self.queue.put((False, None, -1.0))
                         return
                     self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     continue
@@ -334,18 +341,21 @@ class ThreadedFrameReader:
                     continue
 
             retry_count = 0
+            pos_msec = float(self.cap.get(cv2.CAP_PROP_POS_MSEC))
+            if np.isnan(pos_msec) or pos_msec < 0:
+                pos_msec = -1.0
             try:
-                self.queue.put((True, frame), timeout=0.1)
+                self.queue.put((True, frame, pos_msec), timeout=0.1)
             except queue.Full:
                 pass
 
-    def read(self) -> tuple[bool, Optional[np.ndarray]]:
+    def read(self) -> tuple[bool, Optional[np.ndarray], float]:
         if self.stopped and self.queue.empty():
-            return False, None
+            return False, None, -1.0
         try:
             return self.queue.get(timeout=0.5)
         except queue.Empty:
-            return False, None
+            return False, None, -1.0
 
     def stop(self):
         self.stopped = True
@@ -858,16 +868,22 @@ async def video_stream(
         frame_step = max(0, int(round(fps / target_fps)) - 1) if fps > target_fps else 0
         delay = 1.0 / target_fps
         is_file = SOURCES.get(source_id, {}).get("kind") == "file"
+        if is_file and mode == "detect":
+            # In detection mode for offline files, avoid extra skip to prevent fast-forward feel.
+            frame_step = 0
 
         # Use threaded reader for smoother frame acquisition
         reader = ThreadedFrameReader(
             cap,
-            queue_size=10,
+            queue_size=6 if is_file else 10,
             skip_frames=frame_step,
             is_file=is_file,
+            drop_if_full=not is_file,
         )
 
         frame_deadline = time.monotonic()
+        sync_start_wall = None
+        sync_start_pos_msec = None
         frame_idx = 0
         last_dets: List[Dict[str, object]] = []
         detect_future = None
@@ -879,13 +895,16 @@ async def video_stream(
                 if not _is_run_active(source_id, run_id):
                     break
 
-                ret, frame = reader.read()
+                ret, frame, pos_msec = reader.read()
                 if not ret or frame is None:
                     if reader.stopped:
                         break
                     continue
 
                 frame_idx += 1
+                frame_pos_msec = pos_msec
+                if frame_pos_msec < 0 and is_file and fps > 1:
+                    frame_pos_msec = (frame_idx - 1) * (1000.0 / fps)
                 if mode == "infer" and frame_idx % INFER_CACHE_EVERY_N_FRAMES == 0:
                     # Cache the latest frame for infer SSE without blocking stream timing.
                     cache_frame = await loop.run_in_executor(
@@ -951,14 +970,28 @@ async def video_stream(
                     + b"\r\n"
                 )
 
-                # Frame pacing with deadline compensation.
-                frame_deadline += delay
-                remaining = frame_deadline - time.monotonic()
-                if remaining > 0:
-                    await asyncio.sleep(remaining)
-                elif remaining < -0.5:
-                    # Reset deadline if we're too far behind
-                    frame_deadline = time.monotonic()
+                # Prefer timestamp pacing to avoid detect-mode speed-up when source FPS is misreported.
+                if frame_pos_msec >= 0:
+                    if sync_start_wall is None or sync_start_pos_msec is None:
+                        sync_start_wall = time.monotonic()
+                        sync_start_pos_msec = frame_pos_msec
+                    expected_elapsed = max(
+                        0.0, (frame_pos_msec - sync_start_pos_msec) / 1000.0
+                    )
+                    remaining = (sync_start_wall + expected_elapsed) - time.monotonic()
+                    if remaining > 0:
+                        await asyncio.sleep(remaining)
+                    elif remaining < -0.8:
+                        # Too far behind; realign to avoid long-term drift.
+                        sync_start_wall = time.monotonic() - expected_elapsed
+                else:
+                    # Fallback pacing by target FPS when timestamps are unavailable.
+                    frame_deadline += delay
+                    remaining = frame_deadline - time.monotonic()
+                    if remaining > 0:
+                        await asyncio.sleep(remaining)
+                    elif remaining < -0.5:
+                        frame_deadline = time.monotonic()
         finally:
             if reader:
                 reader.stop()
