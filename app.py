@@ -19,6 +19,14 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
 logger = logging.getLogger("web_vlm")
+_LOG_LEVEL_STR = os.getenv("WEB_VLM_LOG_LEVEL", "INFO").upper()
+_LOG_LEVEL = getattr(logging, _LOG_LEVEL_STR, logging.INFO)
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=_LOG_LEVEL,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    )
+logger.setLevel(_LOG_LEVEL)
 
 try:
     import torch
@@ -62,6 +70,10 @@ YOLO_STREAM_INFER_INTERVAL_SEC = 0.45
 STREAM_MAX_EDGE = 720
 STREAM_JPEG_QUALITY = 65
 STREAM_TARGET_FPS = 25
+DETECT_STREAM_MAX_EDGE = 640
+DETECT_STREAM_TARGET_FPS = 14
+NETWORK_OPEN_TIMEOUT_MSEC = 10000
+NETWORK_READ_TIMEOUT_MSEC = 3500
 INFER_CACHE_EVERY_N_FRAMES = 2
 INFER_MIN_INTERVAL_SEC = 1.2
 INFER_CACHE_MAX_AGE_SEC = 2.0
@@ -92,6 +104,40 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+@app.middleware("http")
+async def log_request_middleware(request: Request, call_next):
+    path = request.url.path
+    if not path.startswith("/api/"):
+        return await call_next(request)
+
+    req_id = uuid.uuid4().hex[:8]
+    method = request.method
+    client = request.client.host if request.client else "-"
+    start = time.monotonic()
+    logger.info("[REQ %s] -> %s %s client=%s", req_id, method, path, client)
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception(
+            "[REQ %s] !! %s %s cost=%.1fms",
+            req_id,
+            method,
+            path,
+            (time.monotonic() - start) * 1000.0,
+        )
+        raise
+
+    logger.info(
+        "[REQ %s] <- %s %s status=%d cost=%.1fms",
+        req_id,
+        method,
+        path,
+        response.status_code,
+        (time.monotonic() - start) * 1000.0,
+    )
+    return response
 
 
 @app.on_event("startup")
@@ -127,6 +173,7 @@ def _open_capture(source_id: str) -> cv2.VideoCapture:
     if ffmpeg_options:
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = ffmpeg_options
 
+    open_t0 = time.monotonic()
     cap = cv2.VideoCapture(value, cv2.CAP_FFMPEG)
     if not cap.isOpened():
         cap = cv2.VideoCapture(value, cv2.CAP_ANY)
@@ -136,8 +183,15 @@ def _open_capture(source_id: str) -> cv2.VideoCapture:
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)
     # For network streams, set longer timeouts
     if value.startswith(("http://", "https://", "rtsp://")):
-        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 15000)
-        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 10000)
+        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, NETWORK_OPEN_TIMEOUT_MSEC)
+        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, NETWORK_READ_TIMEOUT_MSEC)
+    logger.info(
+        "视频源打开成功 source=%s kind=%s open_cost=%.2fs ffmpeg_opts=%s",
+        _short_id(source_id),
+        source.get("kind", "unknown"),
+        time.monotonic() - open_t0,
+        "on" if ffmpeg_options else "off",
+    )
     return cap
 
 
@@ -153,6 +207,13 @@ def _start_run(source_id: str) -> str:
     run_id = str(uuid.uuid4())
     with _active_runs_lock:
         _active_runs[source_id] = run_id
+        active_count = len(_active_runs)
+    logger.info(
+        "会话启动 run=%s source=%s active_runs=%d",
+        _short_id(run_id),
+        _short_id(source_id),
+        active_count,
+    )
     return run_id
 
 
@@ -165,11 +226,28 @@ def _stop_run(source_id: str, run_id: str = "") -> bool:
     with _active_runs_lock:
         current = _active_runs.get(source_id)
         if current is None:
+            logger.info(
+                "会话停止忽略 source=%s reason=no_active_run",
+                _short_id(source_id),
+            )
             return False
         if run_id and current != run_id:
+            logger.warning(
+                "会话停止忽略 source=%s requested_run=%s current_run=%s",
+                _short_id(source_id),
+                _short_id(run_id),
+                _short_id(current),
+            )
             return False
         _active_runs.pop(source_id, None)
-        return True
+        active_count = len(_active_runs)
+    logger.info(
+        "会话停止成功 source=%s run=%s active_runs=%d",
+        _short_id(source_id),
+        _short_id(current),
+        active_count,
+    )
+    return True
 
 
 def _clear_detect_cache(source_id: str) -> None:
@@ -195,6 +273,26 @@ def _build_ffmpeg_capture_options(url: str) -> str:
             "rw_timeout;15000000|timeout;10000000"
         )
     return ""
+
+
+def _short_id(value: str, keep: int = 8) -> str:
+    if not value:
+        return "-"
+    return value[:keep]
+
+
+def _source_brief(source_id: str) -> str:
+    source = SOURCES.get(source_id)
+    if not source:
+        return f"{_short_id(source_id)}(missing)"
+    kind = str(source.get("kind", "unknown"))
+    name = str(source.get("name", ""))
+    value = str(source.get("value", ""))
+    if kind == "url":
+        v = value if len(value) <= 110 else (value[:110] + "...")
+    else:
+        v = Path(value).name
+    return f"{_short_id(source_id)} kind={kind} name={name} value={v}"
 
 
 def _require_runtime_deps() -> None:
@@ -331,7 +429,10 @@ class ThreadedFrameReader:
                     retry_count += 1
                     if retry_count > max_retries:
                         self.stopped = True
-                        self.queue.put((False, None, -1.0))
+                        try:
+                            self.queue.put_nowait((False, None, -1.0))
+                        except queue.Full:
+                            pass
                         return
                     self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     continue
@@ -353,13 +454,18 @@ class ThreadedFrameReader:
         if self.stopped and self.queue.empty():
             return False, None, -1.0
         try:
-            return self.queue.get(timeout=0.5)
+            return self.queue.get_nowait()
         except queue.Empty:
             return False, None, -1.0
 
     def stop(self):
         self.stopped = True
-        self.cap.release()
+        try:
+            self.cap.release()
+        except Exception:
+            pass
+        if self.thread.is_alive():
+            self.thread.join(timeout=0.8)
 
 
 def _grab_and_read_frame(cap: cv2.VideoCapture, n_skip: int) -> tuple[bool, np.ndarray]:
@@ -588,6 +694,40 @@ async def defaults() -> JSONResponse:
 # ---------------------------------------------------------------------------
 _upload_sessions: Dict[str, Dict[str, object]] = {}
 _upload_sessions_lock = threading.Lock()
+_UPLOAD_SESSION_TTL_SEC = 1800  # 30 minutes
+
+
+def _cleanup_stale_uploads() -> None:
+    """Remove upload sessions older than TTL and their chunk directories."""
+    now = time.time()
+    to_remove: list[str] = []
+    with _upload_sessions_lock:
+        for uid, sess in _upload_sessions.items():
+            if now - float(sess.get("created", 0)) > _UPLOAD_SESSION_TTL_SEC:
+                to_remove.append(uid)
+        for uid in to_remove:
+            sess = _upload_sessions.pop(uid, None)
+            if sess:
+                chunk_dir = sess.get("chunk_dir", "")
+                if chunk_dir:
+                    shutil.rmtree(str(chunk_dir), ignore_errors=True)
+    if to_remove:
+        logger.info("清理过期上传会话: %d 个", len(to_remove))
+
+
+async def _upload_cleanup_task() -> None:
+    """Periodic background task to clean up stale upload sessions."""
+    while True:
+        await asyncio.sleep(300)  # every 5 minutes
+        try:
+            _cleanup_stale_uploads()
+        except Exception:
+            logger.exception("上传清理任务异常")
+
+
+@app.on_event("startup")
+async def _start_upload_cleanup() -> None:
+    asyncio.create_task(_upload_cleanup_task())
 
 
 @app.post("/api/upload/init")
@@ -618,6 +758,13 @@ async def upload_init(payload: Dict[str, object]) -> JSONResponse:
             "chunk_dir": str(chunk_dir),
             "created": time.time(),
         }
+    logger.info(
+        "上传初始化 upload=%s file=%s size_mb=%.2f total_chunks=%d",
+        _short_id(upload_id),
+        filename,
+        total_size / (1024 * 1024),
+        total_chunks,
+    )
 
     return JSONResponse({"upload_id": upload_id, "message": "上传会话已创建"})
 
@@ -644,11 +791,22 @@ async def upload_chunk(
     with _upload_sessions_lock:
         session["received"].add(chunk_index)
         received_count = len(session["received"])
+        total_chunks = int(session["total_chunks"])
+
+    if chunk_index == 0 or received_count == total_chunks or (received_count % 50 == 0):
+        logger.info(
+            "上传分片 upload=%s progress=%d/%d chunk=%d bytes=%d",
+            _short_id(upload_id),
+            received_count,
+            total_chunks,
+            chunk_index,
+            len(data),
+        )
 
     return JSONResponse({
         "chunk_index": chunk_index,
         "received": received_count,
-        "total_chunks": session["total_chunks"],
+        "total_chunks": total_chunks,
     })
 
 
@@ -687,6 +845,13 @@ async def upload_complete(payload: Dict[str, str]) -> JSONResponse:
         _upload_sessions.pop(upload_id, None)
 
     SOURCES[source_id] = {"kind": "file", "value": str(target_path), "name": filename}
+    logger.info(
+        "上传完成 upload=%s source=%s file=%s size_mb=%.2f",
+        _short_id(upload_id),
+        _short_id(source_id),
+        filename,
+        total_written / (1024 * 1024),
+    )
     return JSONResponse(
         {
             "source_id": source_id,
@@ -725,6 +890,12 @@ async def upload_video(file: UploadFile = File(...)) -> JSONResponse:
         raise HTTPException(status_code=400, detail="上传文件为空")
 
     SOURCES[source_id] = {"kind": "file", "value": str(target_path), "name": filename}
+    logger.info(
+        "单文件上传完成 source=%s file=%s size_mb=%.2f",
+        _short_id(source_id),
+        filename,
+        total / (1024 * 1024),
+    )
     return JSONResponse(
         {
             "source_id": source_id,
@@ -745,6 +916,7 @@ async def register_url(payload: Dict[str, str]) -> JSONResponse:
 
     source_id = str(uuid.uuid4())
     SOURCES[source_id] = {"kind": "url", "value": url, "name": "online_stream"}
+    logger.info("URL 注册成功 source=%s url=%s", _short_id(source_id), url)
     return JSONResponse(
         {
             "source_id": source_id,
@@ -773,6 +945,12 @@ async def register_local(payload: Dict[str, str]) -> JSONResponse:
     file_size = os.path.getsize(file_path)
     source_id = str(uuid.uuid4())
     SOURCES[source_id] = {"kind": "file", "value": file_path, "name": filename}
+    logger.info(
+        "本地文件注册成功 source=%s file=%s size_mb=%.2f",
+        _short_id(source_id),
+        file_path,
+        file_size / (1024 * 1024),
+    )
     return JSONResponse(
         {
             "source_id": source_id,
@@ -825,6 +1003,12 @@ async def control_start(payload: Dict[str, str]) -> JSONResponse:
     run_id = _start_run(source_id)
     _clear_detect_cache(source_id)
     _clear_infer_cache(source_id)
+    logger.info(
+        "控制启动 source=%s run=%s detail=%s",
+        _short_id(source_id),
+        _short_id(run_id),
+        _source_brief(source_id),
+    )
     return JSONResponse(
         {
             "source_id": source_id,
@@ -849,6 +1033,12 @@ async def control_stop(payload: Dict[str, str]) -> JSONResponse:
     stopped = _stop_run(source_id, run_id=run_id)
     _clear_detect_cache(source_id)
     _clear_infer_cache(source_id)
+    logger.info(
+        "控制停止 source=%s requested_run=%s stopped=%s",
+        _short_id(source_id),
+        _short_id(run_id),
+        stopped,
+    )
     return JSONResponse(
         {
             "source_id": source_id,
@@ -880,36 +1070,56 @@ async def video_stream(
         raise HTTPException(status_code=409, detail="分析会话未激活或已停止")
 
     target_list = [x.strip() for x in targets.split(",") if x.strip()]
+    logger.info(
+        "视频流请求 source=%s run=%s mode=%s targets=%s detail=%s",
+        _short_id(source_id),
+        _short_id(run_id),
+        mode,
+        ",".join(target_list) if target_list else "-",
+        _source_brief(source_id),
+    )
 
     async def gen_frames():
         loop = asyncio.get_event_loop()
         reader: Optional[ThreadedFrameReader] = None
+        open_fail = False
 
         try:
             cap = await loop.run_in_executor(None, _open_capture, source_id)
         except ValueError as exc:
             logger.warning("打开视频源失败: %s", exc)
+            open_fail = True
             return
 
         fps = cap.get(cv2.CAP_PROP_FPS)
         if not fps or np.isnan(fps) or fps <= 1:
             fps = float(STREAM_TARGET_FPS)
 
-        target_fps = min(float(STREAM_TARGET_FPS), fps)
+        base_target_fps = float(DETECT_STREAM_TARGET_FPS if mode == "detect" else STREAM_TARGET_FPS)
+        target_fps = min(base_target_fps, fps)
         frame_step = max(0, int(round(fps / target_fps)) - 1) if fps > target_fps else 0
         delay = 1.0 / target_fps
         is_file = SOURCES.get(source_id, {}).get("kind") == "file"
-        if is_file and mode == "detect":
-            # In detection mode for offline files, avoid extra skip to prevent fast-forward feel.
-            frame_step = 0
 
         # Use threaded reader for smoother frame acquisition
         reader = ThreadedFrameReader(
             cap,
-            queue_size=6 if is_file else 10,
+            queue_size=4 if (is_file and mode == "detect") else (6 if is_file else 10),
             skip_frames=frame_step,
             is_file=is_file,
-            drop_if_full=not is_file,
+            # Detect mode should prioritize continuity over completeness.
+            drop_if_full=(not is_file) or (mode == "detect"),
+        )
+        logger.info(
+            "视频流启动 source=%s run=%s mode=%s src_fps=%.2f target_fps=%.2f step=%d qsize=%d is_file=%s",
+            _short_id(source_id),
+            _short_id(run_id),
+            mode,
+            fps,
+            target_fps,
+            frame_step,
+            reader.queue.maxsize,
+            is_file,
         )
 
         frame_deadline = time.monotonic()
@@ -920,6 +1130,13 @@ async def video_stream(
         detect_future = None
         detect_future_frame_idx = 0
         last_detect_submit_ts = 0.0
+        detect_future_submit_ts = 0.0
+        detect_done_count = 0
+        detect_latency_sum = 0.0
+        stream_start = time.monotonic()
+        stat_last_log = stream_start
+        encoded_count = 0
+        miss_reads = 0
 
         try:
             while True:
@@ -930,24 +1147,14 @@ async def video_stream(
                 if not ret or frame is None:
                     if reader.stopped:
                         break
+                    miss_reads += 1
+                    await asyncio.sleep(0.002)
                     continue
 
                 frame_idx += 1
                 frame_pos_msec = pos_msec
                 if frame_pos_msec < 0 and is_file and fps > 1:
                     frame_pos_msec = (frame_idx - 1) * (1000.0 / fps)
-                if mode == "infer" and frame_idx % INFER_CACHE_EVERY_N_FRAMES == 0:
-                    # Cache the latest frame for infer SSE without blocking stream timing.
-                    cache_frame = await loop.run_in_executor(
-                        None, _resize_by_max_edge, frame.copy(), QWEN_MAX_IMAGE_EDGE
-                    )
-                    with _infer_frame_cache_lock:
-                        _infer_frame_cache[source_id] = {
-                            "run_id": run_id,
-                            "frame": frame_idx,
-                            "image": cache_frame,
-                            "ts": time.time(),
-                        }
                 if mode == "detect":
                     if detect_future is not None and detect_future.done():
                         try:
@@ -959,6 +1166,11 @@ async def video_stream(
                                     "dets": last_dets,
                                     "ts": time.time(),
                                 }
+                            if detect_future_submit_ts > 0:
+                                detect_done_count += 1
+                                detect_latency_sum += max(
+                                    0.0, time.monotonic() - detect_future_submit_ts
+                                )
                         except Exception as exc:
                             logger.exception("YOLO 检测失败: %s", exc)
                             last_dets = []
@@ -982,12 +1194,13 @@ async def video_stream(
                             YOLO_STREAM_IMGSZ,
                         )
                         last_detect_submit_ts = now
+                        detect_future_submit_ts = now
 
                 display_frame, encoded_bytes = await loop.run_in_executor(
                     None,
                     _resize_draw_encode_jpeg,
                     frame,
-                    STREAM_MAX_EDGE,
+                    DETECT_STREAM_MAX_EDGE if mode == "detect" else STREAM_MAX_EDGE,
                     STREAM_JPEG_QUALITY,
                     last_dets if mode == "detect" else None,
                 )
@@ -1000,6 +1213,27 @@ async def video_stream(
                     + encoded_bytes
                     + b"\r\n"
                 )
+                encoded_count += 1
+
+                now_log = time.monotonic()
+                if now_log - stat_last_log >= 5.0:
+                    elapsed = max(1e-6, now_log - stream_start)
+                    out_fps = encoded_count / elapsed
+                    logger.info(
+                        "视频流统计 source=%s run=%s mode=%s frames=%d out_fps=%.2f miss_reads=%d queue=%d detect_done=%d detect_avg=%.3fs",
+                        _short_id(source_id),
+                        _short_id(run_id),
+                        mode,
+                        encoded_count,
+                        out_fps,
+                        miss_reads,
+                        reader.queue.qsize() if reader else -1,
+                        detect_done_count,
+                        (detect_latency_sum / detect_done_count)
+                        if detect_done_count > 0
+                        else 0.0,
+                    )
+                    stat_last_log = now_log
 
                 # Prefer timestamp pacing to avoid detect-mode speed-up when source FPS is misreported.
                 if frame_pos_msec >= 0:
@@ -1024,8 +1258,26 @@ async def video_stream(
                     elif remaining < -0.5:
                         frame_deadline = time.monotonic()
         finally:
+            if detect_future is not None and (not detect_future.done()):
+                detect_future.cancel()
             if reader:
                 reader.stop()
+            if not open_fail:
+                total = max(1e-6, time.monotonic() - stream_start)
+                logger.info(
+                    "视频流结束 source=%s run=%s mode=%s duration=%.2fs frames=%d avg_fps=%.2f miss_reads=%d detect_done=%d detect_avg=%.3fs",
+                    _short_id(source_id),
+                    _short_id(run_id),
+                    mode,
+                    total,
+                    encoded_count,
+                    encoded_count / total,
+                    miss_reads,
+                    detect_done_count,
+                    (detect_latency_sum / detect_done_count)
+                    if detect_done_count > 0
+                    else 0.0,
+                )
 
     return StreamingResponse(
         gen_frames(),
@@ -1049,6 +1301,13 @@ async def infer_stream(
         raise HTTPException(status_code=404, detail="source_id 不存在")
     if not _is_run_active(source_id, run_id):
         raise HTTPException(status_code=409, detail="分析会话未激活或已停止")
+    logger.info(
+        "推理流请求 source=%s run=%s prompt_len=%d detail=%s",
+        _short_id(source_id),
+        _short_id(run_id),
+        len(prompt or ""),
+        _source_brief(source_id),
+    )
 
     async def event_gen():
         loop = asyncio.get_event_loop()
@@ -1066,6 +1325,10 @@ async def infer_stream(
         max_loop_retries = 3
         retry_count = 0
         last_infer_ts = 0.0
+        infer_count = 0
+        infer_latency_sum = 0.0
+        stream_start = time.monotonic()
+        stat_last_log = stream_start
 
         try:
             while True:
@@ -1097,9 +1360,13 @@ async def infer_stream(
 
                 frame = _resize_by_max_edge(frame, max_edge=QWEN_MAX_IMAGE_EDGE)
                 try:
+                    infer_t0 = time.monotonic()
                     text = await loop.run_in_executor(
                         None, _qwen_caption, frame.copy(), prompt, source_id, run_id
                     )
+                    infer_latency = time.monotonic() - infer_t0
+                    infer_count += 1
+                    infer_latency_sum += infer_latency
                 except Exception as exc:
                     logger.exception("Qwen 推理失败: %s", exc)
                     yield (
@@ -1124,9 +1391,33 @@ async def infer_stream(
                 yield (
                     f"data: {json.dumps({'type': 'end', 'text': '', 'frame': frame_idx, 'ts': time.time()}, ensure_ascii=False)}\n\n"
                 )
+                now_log = time.monotonic()
+                if now_log - stat_last_log >= 6.0:
+                    elapsed = max(1e-6, now_log - stream_start)
+                    avg_latency = infer_latency_sum / max(1, infer_count)
+                    logger.info(
+                        "推理流统计 source=%s run=%s inferences=%d infer_rate=%.2f/s avg_latency=%.2fs",
+                        _short_id(source_id),
+                        _short_id(run_id),
+                        infer_count,
+                        infer_count / elapsed,
+                        avg_latency,
+                    )
+                    stat_last_log = now_log
                 await asyncio.sleep(0.06)
         finally:
             cap.release()
+            elapsed = max(1e-6, time.monotonic() - stream_start)
+            avg_latency = infer_latency_sum / max(1, infer_count)
+            logger.info(
+                "推理流结束 source=%s run=%s duration=%.2fs inferences=%d infer_rate=%.2f/s avg_latency=%.2fs",
+                _short_id(source_id),
+                _short_id(run_id),
+                elapsed,
+                infer_count,
+                infer_count / elapsed,
+                avg_latency,
+            )
 
     return StreamingResponse(
         event_gen(),
@@ -1148,10 +1439,20 @@ async def detect_stream(
         raise HTTPException(status_code=409, detail="分析会话未激活或已停止")
 
     _ = [x.strip() for x in targets.split(",") if x.strip()]
+    logger.info(
+        "检测事件流请求 source=%s run=%s targets=%s detail=%s",
+        _short_id(source_id),
+        _short_id(run_id),
+        targets or "-",
+        _source_brief(source_id),
+    )
 
     async def event_gen():
         last_sent_frame = -1
         idle_ticks = 0
+        sent_messages = 0
+        stream_start = time.monotonic()
+        stat_last_log = stream_start
         while True:
             if await request.is_disconnected():
                 break
@@ -1179,6 +1480,7 @@ async def detect_stream(
                 yield (
                     f"data: {json.dumps({'type': 'detect', 'text': message, 'frame': frame_idx, 'count': len(dets)}, ensure_ascii=False)}\n\n"
                 )
+                sent_messages += 1
                 last_sent_frame = frame_idx
                 idle_ticks = 0
             else:
@@ -1188,7 +1490,28 @@ async def detect_stream(
                         f"data: {json.dumps({'type': 'waiting', 'text': '等待检测结果...', 'frame': -1, 'count': 0}, ensure_ascii=False)}\n\n"
                     )
 
+            now_log = time.monotonic()
+            if now_log - stat_last_log >= 6.0:
+                elapsed = max(1e-6, now_log - stream_start)
+                logger.info(
+                    "检测事件流统计 source=%s run=%s messages=%d rate=%.2f/s idle_ticks=%d",
+                    _short_id(source_id),
+                    _short_id(run_id),
+                    sent_messages,
+                    sent_messages / elapsed,
+                    idle_ticks,
+                )
+                stat_last_log = now_log
             await asyncio.sleep(0.08)
+        elapsed = max(1e-6, time.monotonic() - stream_start)
+        logger.info(
+            "检测事件流结束 source=%s run=%s duration=%.2fs messages=%d rate=%.2f/s",
+            _short_id(source_id),
+            _short_id(run_id),
+            elapsed,
+            sent_messages,
+            sent_messages / elapsed,
+        )
 
     return StreamingResponse(
         event_gen(),

@@ -385,10 +385,12 @@ async function startVideoStream() {
 
   if (state.mode === "infer") {
     const prompt = encodeURIComponent(el.promptInput.value.trim() || state.defaultPrompt);
-    state.eventSource = new EventSource(
-      `/api/infer/stream?source_id=${state.sourceId}&run_id=${encodeURIComponent(state.runId)}&prompt=${prompt}`
-    );
-    state.eventSource.onmessage = (evt) => {
+    function makeInferSSE() {
+      return new EventSource(
+        `/api/infer/stream?source_id=${state.sourceId}&run_id=${encodeURIComponent(state.runId)}&prompt=${prompt}`
+      );
+    }
+    function onInferMessage(evt) {
       try {
         const payload = JSON.parse(evt.data);
         if (payload.type === "start") {
@@ -401,20 +403,44 @@ async function startVideoStream() {
       } catch (e) {
         console.error("SSE parse error:", e);
       }
-    };
+    }
+    state.eventSource = makeInferSSE();
+    state.eventSource.onmessage = onInferMessage;
+    let inferReconnected = false;
     state.eventSource.onerror = () => {
+      if (!inferReconnected && _is_run_active_local()) {
+        inferReconnected = true;
+        addLog("⚠ 推理流短暂中断，正在重连...", true);
+        if (state.eventSource) state.eventSource.close();
+        setTimeout(() => {
+          if (!_is_run_active_local()) return;
+          state.eventSource = makeInferSSE();
+          state.eventSource.onmessage = onInferMessage;
+          state.eventSource.onerror = () => {
+            addLog("⚠ 推理流连接中断，请重新点击「开始分析」", true);
+            setStatus("推理流中断", false);
+            setLive(false);
+            state.runId = null;
+            el.startBtn.disabled = !state.sourceId;
+            el.stopBtn.disabled = true;
+          };
+        }, 1500);
+        return;
+      }
       addLog("⚠ 推理流连接中断，请重新点击「开始分析」", true);
       setStatus("推理流中断", false);
       setLive(false);
       state.runId = null;
-      el.startBtn.disabled = false;
+      el.startBtn.disabled = !state.sourceId;
       el.stopBtn.disabled = true;
     };
   } else {
-    state.eventSource = new EventSource(
-      `/api/detect/stream?source_id=${state.sourceId}&run_id=${encodeURIComponent(state.runId)}&targets=${encodeURIComponent(el.targetInput.value.trim())}`
-    );
-    state.eventSource.onmessage = (evt) => {
+    function makeDetectSSE() {
+      return new EventSource(
+        `/api/detect/stream?source_id=${state.sourceId}&run_id=${encodeURIComponent(state.runId)}&targets=${encodeURIComponent(el.targetInput.value.trim())}`
+      );
+    }
+    function onDetectMessage(evt) {
       try {
         const payload = JSON.parse(evt.data);
         if (payload.type === "detect") {
@@ -423,13 +449,35 @@ async function startVideoStream() {
       } catch (e) {
         console.error("SSE parse error:", e);
       }
-    };
+    }
+    state.eventSource = makeDetectSSE();
+    state.eventSource.onmessage = onDetectMessage;
+    let detectReconnected = false;
     state.eventSource.onerror = () => {
+      if (!detectReconnected && _is_run_active_local()) {
+        detectReconnected = true;
+        addLog("⚠ 检测流短暂中断，正在重连...", true);
+        if (state.eventSource) state.eventSource.close();
+        setTimeout(() => {
+          if (!_is_run_active_local()) return;
+          state.eventSource = makeDetectSSE();
+          state.eventSource.onmessage = onDetectMessage;
+          state.eventSource.onerror = () => {
+            addLog("⚠ 检测流连接中断，请重新点击「开始分析」", true);
+            setStatus("检测流中断", false);
+            setLive(false);
+            state.runId = null;
+            el.startBtn.disabled = !state.sourceId;
+            el.stopBtn.disabled = true;
+          };
+        }, 1500);
+        return;
+      }
       addLog("⚠ 检测流连接中断，请重新点击「开始分析」", true);
       setStatus("检测流中断", false);
       setLive(false);
       state.runId = null;
-      el.startBtn.disabled = false;
+      el.startBtn.disabled = !state.sourceId;
       el.stopBtn.disabled = true;
     };
   }
@@ -438,6 +486,10 @@ async function startVideoStream() {
   el.stopBtn.disabled = false;
   setStatus("分析中", true);
   setLive(true);
+}
+
+function _is_run_active_local() {
+  return !!(state.sourceId && state.runId);
 }
 
 async function uploadChunkWithRetry(url, formData, maxRetries = 3) {
@@ -549,6 +601,9 @@ async function uploadVideo() {
     el.streamMeta.textContent = `来源: ${data.name} (${data.size_mb || "?"}MB)`;
     setStatus("视频已就绪", true);
     addLog(`✓ 已加载: ${data.name} (${data.size_mb}MB)`);
+    // 视觉反馈：短暂高亮开始按钮
+    el.startBtn.classList.add("pulse-ready");
+    setTimeout(() => el.startBtn.classList.remove("pulse-ready"), 2000);
   } finally {
     el.uploadBtn.disabled = false;
     el.uploadBtn.textContent = originalText;
@@ -583,6 +638,8 @@ async function registerUrl() {
     el.streamMeta.textContent = `来源: ${url}`;
     setStatus("流地址已就绪", true);
     addLog(`✓ 已接入: ${url}`);
+    el.startBtn.classList.add("pulse-ready");
+    setTimeout(() => el.startBtn.classList.remove("pulse-ready"), 2000);
   } finally {
     el.urlBtn.disabled = false;
   }
@@ -616,6 +673,8 @@ async function loadLocalFile() {
     el.streamMeta.textContent = `来源: ${data.name} (${data.size_mb || "?"}MB)`;
     setStatus("视频已就绪", true);
     addLog(`✓ 已加载服务器文件: ${data.name}`);
+    el.startBtn.classList.add("pulse-ready");
+    setTimeout(() => el.startBtn.classList.remove("pulse-ready"), 2000);
   } finally {
     el.localBtn.disabled = false;
   }
@@ -683,12 +742,23 @@ el.localBtn.addEventListener("click", async () => {
 });
 
 el.startBtn.addEventListener("click", async () => {
-  try { await startVideoStream(); }
-  catch (err) { addLog(`❌ 启动失败: ${err.message}`, true); setStatus("启动失败", false); }
+  const origText = el.startBtn.textContent;
+  el.startBtn.textContent = "启动中...";
+  el.startBtn.disabled = true;
+  try {
+    await startVideoStream();
+    el.startBtn.textContent = origText;
+  } catch (err) {
+    addLog(`❌ 启动失败: ${err.message}`, true);
+    setStatus("启动失败", false);
+    el.startBtn.disabled = !state.sourceId;
+    el.startBtn.textContent = origText;
+  }
 });
 
 el.stopBtn.addEventListener("click", async () => {
-  await stopAnalysis(true, true);
+  await stopAnalysis(true, false);
+  addLog("■ 分析已停止，可重新点击「开始分析」继续");
 });
 
 el.applyPromptBtn.addEventListener("click", async () => {

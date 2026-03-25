@@ -798,6 +798,20 @@ body[data-theme="light"] .bg-blob {
   }
 }
 
+@keyframes pulse-ready-glow {
+  0%, 100% {
+    box-shadow: var(--shadow-sm), 0 0 14px var(--success-muted);
+  }
+  50% {
+    box-shadow: var(--shadow-md), 0 0 28px rgba(52, 211, 153, 0.5);
+    transform: scale(1.02);
+  }
+}
+
+.btn-accent.pulse-ready {
+  animation: pulse-ready-glow 0.8s ease-in-out 2;
+}
+
 /* Fade in animation */
 @keyframes fade-in {
   from {
