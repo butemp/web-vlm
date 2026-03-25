@@ -466,6 +466,9 @@ def _yolo_detect(
 ) -> List[Dict[str, object]]:
     model = _ensure_yolo_loaded()
     target_set = {x.lower().strip() for x in targets if x.strip()}
+    frame_h, frame_w = frame.shape[:2]
+    safe_w = max(1, frame_w)
+    safe_h = max(1, frame_h)
 
     with _yolo_lock:
         results = model.predict(
@@ -499,6 +502,14 @@ def _yolo_detect(
                 "label": label,
                 "conf": conf,
                 "xyxy": [x1, y1, x2, y2],
+                # Keep normalized coords so boxes stay aligned across
+                # different render resolutions.
+                "norm_xyxy": [
+                    float(x1) / safe_w,
+                    float(y1) / safe_h,
+                    float(x2) / safe_w,
+                    float(y2) / safe_h,
+                ],
             }
         )
 
@@ -514,9 +525,29 @@ def _draw_detections(frame: np.ndarray, detections: List[Dict[str, object]]) -> 
         (255, 128, 212),
         (180, 180, 255),
     ]
+    fh, fw = frame.shape[:2]
 
     for i, det in enumerate(detections):
-        x1, y1, x2, y2 = det["xyxy"]
+        norm_xyxy = det.get("norm_xyxy")
+        if (
+            isinstance(norm_xyxy, (list, tuple))
+            and len(norm_xyxy) == 4
+        ):
+            nx1, ny1, nx2, ny2 = [float(v) for v in norm_xyxy]
+            x1 = int(nx1 * fw)
+            y1 = int(ny1 * fh)
+            x2 = int(nx2 * fw)
+            y2 = int(ny2 * fh)
+        else:
+            x1, y1, x2, y2 = [int(v) for v in det["xyxy"]]
+
+        x1 = max(0, min(fw - 1, x1))
+        y1 = max(0, min(fh - 1, y1))
+        x2 = max(0, min(fw - 1, x2))
+        y2 = max(0, min(fh - 1, y2))
+        if x2 <= x1 or y2 <= y1:
+            continue
+
         label = det["label"]
         conf = det["conf"]
         color = color_palette[i % len(color_palette)]

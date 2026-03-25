@@ -255,6 +255,38 @@ function appendToLatest(text) {
   el.logBox.scrollTop = el.logBox.scrollHeight;
 }
 
+function resetToInitialViewState() {
+  state.sourceId = null;
+  state.runId = null;
+  state.sourceKind = "";
+  state.playbackUrl = "";
+  state.mode = "infer";
+  state.sourceType = "upload";
+
+  stopNativePlayback();
+  el.streamView.removeAttribute("src");
+  el.streamView.style.display = "none";
+  el.streamPlaceholder.style.display = "flex";
+
+  updateSourceTypeUI();
+  updateModeUI();
+
+  el.streamMeta.textContent = "等待输入视频源";
+  el.promptInput.value = state.defaultPrompt;
+  el.targetInput.value = "";
+  el.streamUrl.value = "";
+  el.localPath.value = "";
+  if (el.videoFile) el.videoFile.value = "";
+  if (el.fileDropText) el.fileDropText.textContent = "点击或拖拽视频文件";
+
+  clearLogs();
+  addLog("欢迎使用 Video Intelligence Studio。请先接入视频源，然后点击「开始分析」。");
+  setStatus("等待连接", false);
+  setLive(false);
+  el.startBtn.disabled = true;
+  el.stopBtn.disabled = true;
+}
+
 /* ── UI State ── */
 function updateSourceTypeUI() {
   el.sourceTypeSeg.querySelectorAll("button").forEach((btn) => {
@@ -277,7 +309,7 @@ function updateModeUI() {
 }
 
 /* ── Core Actions ── */
-async function stopAnalysis(notifyBackend = true) {
+async function stopAnalysis(notifyBackend = true, resetToInitial = false) {
   const sourceId = state.sourceId;
   const runId = state.runId;
 
@@ -286,28 +318,30 @@ async function stopAnalysis(notifyBackend = true) {
     state.eventSource = null;
   }
 
-  if (notifyBackend && sourceId && runId) {
-    try {
-      await fetchJson("/api/control/stop", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ source_id: sourceId, run_id: runId }),
-      });
-    } catch (e) {
-      console.warn("stop control failed:", e);
-    }
+  if (resetToInitial) {
+    resetToInitialViewState();
+  } else {
+    state.runId = null;
+    stopNativePlayback();
+    el.streamView.removeAttribute("src");
+    el.streamView.style.display = "none";
+    el.streamPlaceholder.style.display = "flex";
+    el.stopBtn.disabled = true;
+    el.startBtn.disabled = !state.sourceId;
+    el.streamMeta.textContent = "分析已暂停";
+    setStatus("已停止", false);
+    setLive(false);
   }
 
-  state.runId = null;
-  stopNativePlayback();
-  el.streamView.removeAttribute("src");
-  el.streamView.style.display = "none";
-  el.streamPlaceholder.style.display = "flex";
-  el.stopBtn.disabled = true;
-  el.startBtn.disabled = !state.sourceId;
-  el.streamMeta.textContent = "分析已暂停";
-  setStatus("已停止", false);
-  setLive(false);
+  if (notifyBackend && sourceId && runId) {
+    fetchJson("/api/control/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source_id: sourceId, run_id: runId }),
+    }).catch((e) => {
+      console.warn("stop control failed:", e);
+    });
+  }
 }
 
 async function startVideoStream() {
@@ -654,7 +688,7 @@ el.startBtn.addEventListener("click", async () => {
 });
 
 el.stopBtn.addEventListener("click", async () => {
-  await stopAnalysis(true);
+  await stopAnalysis(true, true);
 });
 
 el.applyPromptBtn.addEventListener("click", async () => {
