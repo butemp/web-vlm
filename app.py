@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
@@ -70,8 +71,8 @@ YOLO_STREAM_INFER_INTERVAL_SEC = 0.45
 STREAM_MAX_EDGE = 720
 STREAM_JPEG_QUALITY = 65
 STREAM_TARGET_FPS = 25
-DETECT_STREAM_MAX_EDGE = 640
-DETECT_STREAM_TARGET_FPS = 14
+DETECT_STREAM_MAX_EDGE = 540
+DETECT_STREAM_TARGET_FPS = 20
 NETWORK_OPEN_TIMEOUT_MSEC = 10000
 NETWORK_READ_TIMEOUT_MSEC = 3500
 INFER_CACHE_EVERY_N_FRAMES = 2
@@ -95,6 +96,11 @@ _infer_frame_cache: Dict[str, Dict[str, object]] = {}
 
 _active_runs_lock = threading.Lock()
 _active_runs: Dict[str, str] = {}
+
+# Separate executor for JPEG encoding so it doesn't compete with YOLO/Qwen inference
+_encode_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=3, thread_name_prefix="jpeg-enc"
+)
 
 app = FastAPI(title="Realtime Video Inference Demo", version="0.2.0")
 app.add_middleware(
@@ -1102,13 +1108,20 @@ async def video_stream(
         is_file = SOURCES.get(source_id, {}).get("kind") == "file"
 
         # Use threaded reader for smoother frame acquisition
+        if mode == "detect":
+            q_size = 8
+            # File playback: use backpressure to avoid frame drops (smoother).
+            # Live streams: drop old frames to keep latency low.
+            drop = not is_file
+        else:
+            q_size = 6 if is_file else 10
+            drop = not is_file
         reader = ThreadedFrameReader(
             cap,
-            queue_size=4 if (is_file and mode == "detect") else (6 if is_file else 10),
+            queue_size=q_size,
             skip_frames=frame_step,
             is_file=is_file,
-            # Detect mode should prioritize continuity over completeness.
-            drop_if_full=(not is_file) or (mode == "detect"),
+            drop_if_full=drop,
         )
         logger.info(
             "视频流启动 source=%s run=%s mode=%s src_fps=%.2f target_fps=%.2f step=%d qsize=%d is_file=%s",
@@ -1197,7 +1210,7 @@ async def video_stream(
                         detect_future_submit_ts = now
 
                 display_frame, encoded_bytes = await loop.run_in_executor(
-                    None,
+                    _encode_executor,
                     _resize_draw_encode_jpeg,
                     frame,
                     DETECT_STREAM_MAX_EDGE if mode == "detect" else STREAM_MAX_EDGE,
