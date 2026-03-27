@@ -223,18 +223,21 @@ def _safe_filename(name: str) -> str:
     return name
 
 
-def _start_run(source_id: str) -> str:
+def _start_run(source_id: str) -> tuple[str, List[str]]:
     run_id = str(uuid.uuid4())
     with _active_runs_lock:
+        replaced_sources = [sid for sid in _active_runs.keys() if sid != source_id]
+        _active_runs.clear()
         _active_runs[source_id] = run_id
         active_count = len(_active_runs)
     logger.info(
-        "会话启动 run=%s source=%s active_runs=%d",
+        "会话启动 run=%s source=%s active_runs=%d replaced=%d",
         _short_id(run_id),
         _short_id(source_id),
         active_count,
+        len(replaced_sources),
     )
-    return run_id
+    return run_id, replaced_sources
 
 
 def _is_run_active(source_id: str, run_id: str) -> bool:
@@ -1084,19 +1087,24 @@ async def control_start(payload: Dict[str, str]) -> JSONResponse:
     if not source_id or source_id not in SOURCES:
         raise HTTPException(status_code=404, detail="source_id 不存在")
 
-    run_id = _start_run(source_id)
+    run_id, replaced_sources = _start_run(source_id)
+    for sid in replaced_sources:
+        _clear_detect_cache(sid)
+        _clear_infer_cache(sid)
     _clear_detect_cache(source_id)
     _clear_infer_cache(source_id)
     logger.info(
-        "控制启动 source=%s run=%s detail=%s",
+        "控制启动 source=%s run=%s replaced_sources=%d detail=%s",
         _short_id(source_id),
         _short_id(run_id),
+        len(replaced_sources),
         _source_brief(source_id),
     )
     return JSONResponse(
         {
             "source_id": source_id,
             "run_id": run_id,
+            "replaced_sources": replaced_sources,
             "message": "分析会话已启动",
         }
     )

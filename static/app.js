@@ -81,6 +81,33 @@ async function fetchJson(url, options = {}) {
   return data;
 }
 
+async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 15000) {
+  const timeoutController = new AbortController();
+  const externalSignal = options.signal || null;
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      timeoutController.abort();
+    } else {
+      externalSignal.addEventListener("abort", () => timeoutController.abort(), { once: true });
+    }
+  }
+
+  const timer = setTimeout(() => {
+    timeoutController.abort();
+  }, timeoutMs);
+
+  try {
+    return await fetchJson(url, { ...options, signal: timeoutController.signal });
+  } catch (err) {
+    if (timeoutController.signal.aborted && !(externalSignal && externalSignal.aborted)) {
+      throw new Error(`请求超时（>${Math.floor(timeoutMs / 1000)}s）`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function isHlsUrl(url) {
   if (!url) return false;
   return url.toLowerCase().includes(".m3u8");
@@ -494,14 +521,23 @@ function _is_run_active_local() {
 
 async function uploadChunkWithRetry(url, formData, maxRetries = 3) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    let timer = null;
     try {
-      const resp = await fetch(url, { method: "POST", body: formData });
+      const timeoutController = new AbortController();
+      timer = setTimeout(() => timeoutController.abort(), 20000);
+      const resp = await fetch(url, {
+        method: "POST",
+        body: formData,
+        signal: timeoutController.signal,
+      });
+      clearTimeout(timer);
       if (!resp.ok) {
         const text = await resp.text();
         throw new Error(`HTTP ${resp.status}: ${text}`);
       }
       return await resp.json();
     } catch (err) {
+      if (timer) clearTimeout(timer);
       if (attempt === maxRetries) throw err;
       // Wait before retry: 1s, 2s, 3s...
       await new Promise(r => setTimeout(r, attempt * 1000));
@@ -532,15 +568,36 @@ async function uploadVideo() {
     // Step 1: Init upload session
     setStatus("初始化上传...", false);
     el.uploadBtn.textContent = "初始化...";
-    const initData = await fetchJson("/api/upload/init", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        filename: file.name,
-        total_size: file.size,
-        total_chunks: totalChunks,
-      }),
+    let initData = null;
+    const initPayload = JSON.stringify({
+      filename: file.name,
+      total_size: file.size,
+      total_chunks: totalChunks,
     });
+    const INIT_RETRIES = 3;
+    for (let attempt = 1; attempt <= INIT_RETRIES; attempt++) {
+      try {
+        initData = await fetchJsonWithTimeout(
+          "/api/upload/init",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: initPayload,
+          },
+          12000
+        );
+        break;
+      } catch (err) {
+        if (attempt === INIT_RETRIES) throw err;
+        const waitMs = 700 * attempt;
+        setStatus(`初始化重试中（${attempt}/${INIT_RETRIES - 1}）...`, false);
+        el.uploadBtn.textContent = `重试 ${attempt}/${INIT_RETRIES - 1}`;
+        await new Promise((r) => setTimeout(r, waitMs));
+      }
+    }
+    if (!initData || !initData.upload_id) {
+      throw new Error("初始化上传失败：后端未返回 upload_id");
+    }
     const uploadId = initData.upload_id;
 
     // Step 2: Upload chunks with progress
