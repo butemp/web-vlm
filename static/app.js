@@ -366,7 +366,12 @@ function updateModeUI() {
 }
 
 /* ── Core Actions ── */
-async function stopAnalysis(notifyBackend = true, resetToInitial = false, invalidateAction = true) {
+async function stopAnalysis(
+  notifyBackend = true,
+  resetToInitial = false,
+  invalidateAction = true,
+  waitBackendStop = false
+) {
   if (invalidateAction) {
     claimAction("stop");
   }
@@ -394,13 +399,17 @@ async function stopAnalysis(notifyBackend = true, resetToInitial = false, invali
   }
 
   if (notifyBackend && sourceId && runId) {
-    fetchJson("/api/control/stop", {
+    const stopPromise = fetchJsonWithTimeout("/api/control/stop", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ source_id: sourceId, run_id: runId }),
-    }).catch((e) => {
+    }, 7000).catch((e) => {
       console.warn("stop control failed:", e);
+      return null;
     });
+    if (waitBackendStop) {
+      await stopPromise;
+    }
   }
 }
 
@@ -416,7 +425,7 @@ async function startVideoStream() {
   }
 
   if (state.runId || state.eventSource) {
-    await stopAnalysis(true, false, false);
+    await stopAnalysis(true, false, false, true);
   }
   if (!isActionActive(actionToken)) return;
 
@@ -627,7 +636,7 @@ async function uploadChunkWithRetry(url, formData, maxRetries = 3, signal = null
 async function uploadVideo() {
   const actionToken = claimAction("upload");
   if (state.runId || state.eventSource) {
-    await stopAnalysis(true, false, false);
+    await stopAnalysis(true, false, false, true);
   }
   if (!isActionActive(actionToken)) return;
 
@@ -811,7 +820,7 @@ async function uploadVideo() {
 async function registerUrl() {
   const actionToken = claimAction("connect_url");
   if (state.runId || state.eventSource) {
-    await stopAnalysis(true, false, false);
+    await stopAnalysis(true, false, false, true);
   }
   if (!isActionActive(actionToken)) return;
 
@@ -851,7 +860,7 @@ async function registerUrl() {
 async function loadLocalFile() {
   const actionToken = claimAction("load_local");
   if (state.runId || state.eventSource) {
-    await stopAnalysis(true, false, false);
+    await stopAnalysis(true, false, false, true);
   }
   if (!isActionActive(actionToken)) return;
 
@@ -918,7 +927,7 @@ el.sourceTypeSeg.addEventListener("click", async (e) => {
   const btn = e.target.closest("button[data-source-type]");
   if (!btn) return;
   if (state.runId || state.eventSource) {
-    await stopAnalysis(true);
+    await stopAnalysis(true, false, true, true);
   }
   state.sourceType = btn.dataset.sourceType;
   updateSourceTypeUI();
@@ -929,7 +938,7 @@ el.modeSeg.addEventListener("click", async (e) => {
   if (!btn) return;
 
   if (state.runId || state.eventSource) {
-    await stopAnalysis(true);
+    await stopAnalysis(true, false, true, true);
   }
   state.mode = btn.dataset.mode;
   updateModeUI();

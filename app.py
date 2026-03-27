@@ -250,6 +250,20 @@ def _get_active_run_id(source_id: str) -> str:
         return _active_runs.get(source_id, "")
 
 
+def _stop_all_runs(reason: str = "") -> List[str]:
+    with _active_runs_lock:
+        stopped_sources = list(_active_runs.keys())
+        _active_runs.clear()
+    if stopped_sources:
+        logger.info(
+            "全量停止会话 count=%d reason=%s sources=%s",
+            len(stopped_sources),
+            reason or "-",
+            ",".join([_short_id(x) for x in stopped_sources]),
+        )
+    return stopped_sources
+
+
 def _stop_run(source_id: str, run_id: str = "") -> bool:
     with _active_runs_lock:
         current = _active_runs.get(source_id)
@@ -516,7 +530,16 @@ class ThreadedFrameReader:
         except Exception:
             pass
         if self.thread.is_alive():
-            self.thread.join(timeout=0.8)
+            join_timeout = max(
+                0.8,
+                (float(NETWORK_READ_TIMEOUT_MSEC) / 1000.0) + 0.6,
+            )
+            self.thread.join(timeout=join_timeout)
+            if self.thread.is_alive():
+                logger.warning(
+                    "读帧线程未及时退出，后续将由后台超时回收 thread=%s",
+                    self.thread.name,
+                )
 
 
 def _grab_and_read_frame(cap: cv2.VideoCapture, n_skip: int) -> tuple[bool, np.ndarray]:
@@ -784,6 +807,11 @@ async def _start_upload_cleanup() -> None:
 @app.post("/api/upload/init")
 async def upload_init(payload: Dict[str, object]) -> JSONResponse:
     """Initialize a chunked upload session."""
+    stopped_sources = _stop_all_runs(reason="upload_init")
+    for sid in stopped_sources:
+        _clear_detect_cache(sid)
+        _clear_infer_cache(sid)
+
     filename = _safe_filename(str(payload.get("filename", "video.mp4")))
     total_size = int(payload.get("total_size", 0))
     total_chunks = int(payload.get("total_chunks", 0))
@@ -954,6 +982,11 @@ async def upload_complete(payload: Dict[str, str]) -> JSONResponse:
 # Legacy single-file upload (for small files / direct access)
 @app.post("/api/source/upload")
 async def upload_video(file: UploadFile = File(...)) -> JSONResponse:
+    stopped_sources = _stop_all_runs(reason="upload_single_file")
+    for sid in stopped_sources:
+        _clear_detect_cache(sid)
+        _clear_infer_cache(sid)
+
     filename = _safe_filename(file.filename or "video.mp4")
     source_id = str(uuid.uuid4())
     target_path = UPLOAD_DIR / f"{source_id}_{filename}"
@@ -997,6 +1030,11 @@ async def upload_video(file: UploadFile = File(...)) -> JSONResponse:
 
 @app.post("/api/source/url")
 async def register_url(payload: Dict[str, str]) -> JSONResponse:
+    stopped_sources = _stop_all_runs(reason="register_url")
+    for sid in stopped_sources:
+        _clear_detect_cache(sid)
+        _clear_infer_cache(sid)
+
     url = (payload.get("url") or "").strip()
     if not url:
         raise HTTPException(status_code=400, detail="URL 不能为空")
@@ -1018,6 +1056,11 @@ async def register_url(payload: Dict[str, str]) -> JSONResponse:
 @app.post("/api/source/local")
 async def register_local(payload: Dict[str, str]) -> JSONResponse:
     """Load a video file that already exists on the server."""
+    stopped_sources = _stop_all_runs(reason="register_local")
+    for sid in stopped_sources:
+        _clear_detect_cache(sid)
+        _clear_infer_cache(sid)
+
     file_path = (payload.get("path") or "").strip()
     if not file_path:
         raise HTTPException(status_code=400, detail="路径不能为空")
