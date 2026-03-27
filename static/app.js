@@ -14,6 +14,9 @@ const state = {
   eventSource: null,
   hls: null,
   activeLogNode: null,
+  actionToken: 0,
+  activeAction: "",
+  uploadAbortController: null,
 };
 
 const el = {
@@ -282,6 +285,33 @@ function appendToLatest(text) {
   el.logBox.scrollTop = el.logBox.scrollHeight;
 }
 
+function claimAction(actionName = "") {
+  state.actionToken += 1;
+  state.activeAction = actionName;
+  return state.actionToken;
+}
+
+function isActionActive(token) {
+  return token === state.actionToken;
+}
+
+function releaseAction(token) {
+  if (isActionActive(token)) {
+    state.activeAction = "";
+  }
+}
+
+function isAbortLikeError(err) {
+  if (!err) return false;
+  const name = String(err.name || "");
+  const msg = String(err.message || "").toLowerCase();
+  return (
+    name === "AbortError" ||
+    msg.includes("aborted") ||
+    msg.includes("abort")
+  );
+}
+
 function resetToInitialViewState() {
   state.sourceId = null;
   state.runId = null;
@@ -336,7 +366,10 @@ function updateModeUI() {
 }
 
 /* ── Core Actions ── */
-async function stopAnalysis(notifyBackend = true, resetToInitial = false) {
+async function stopAnalysis(notifyBackend = true, resetToInitial = false, invalidateAction = true) {
+  if (invalidateAction) {
+    claimAction("stop");
+  }
   const sourceId = state.sourceId;
   const runId = state.runId;
 
@@ -372,30 +405,52 @@ async function stopAnalysis(notifyBackend = true, resetToInitial = false) {
 }
 
 async function startVideoStream() {
-  if (!state.sourceId) {
+  const actionToken = claimAction("start");
+  const sourceId = state.sourceId;
+  const mode = state.mode;
+
+  if (!sourceId) {
     addLog("⚠ 请先上传视频或输入流 URL");
+    releaseAction(actionToken);
     return;
   }
 
   if (state.runId || state.eventSource) {
-    await stopAnalysis(true);
+    await stopAnalysis(true, false, false);
   }
+  if (!isActionActive(actionToken)) return;
 
-  const startData = await fetchJson("/api/control/start", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ source_id: state.sourceId }),
-  });
+  const startData = await fetchJsonWithTimeout(
+    "/api/control/start",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source_id: sourceId }),
+    },
+    10000
+  );
   if (!startData.run_id) {
     throw new Error("后端未返回 run_id，请检查服务端日志");
   }
-  state.runId = startData.run_id;
+  const runId = startData.run_id;
+
+  if (!isActionActive(actionToken) || sourceId !== state.sourceId || mode !== state.mode) {
+    bestEffortStopRun(sourceId, runId);
+    return;
+  }
+  state.runId = runId;
 
   clearLogs();
 
   const targets = encodeURIComponent(el.targetInput.value.trim());
-  const streamUrl = `/api/stream/${state.sourceId}?run_id=${encodeURIComponent(state.runId)}&mode=${state.mode}&targets=${targets}&t=${Date.now()}`;
+  const streamUrl = `/api/stream/${sourceId}?run_id=${encodeURIComponent(runId)}&mode=${mode}&targets=${targets}&t=${Date.now()}`;
   const useDirectPlayback = await tryStartDirectPlayback();
+  if (!isActionActive(actionToken) || sourceId !== state.sourceId || runId !== state.runId) {
+    bestEffortStopRun(sourceId, runId);
+    stopNativePlayback();
+    el.streamView.removeAttribute("src");
+    return;
+  }
   if (useDirectPlayback) {
     el.streamView.removeAttribute("src");
     el.streamView.style.display = "none";
@@ -406,15 +461,15 @@ async function startVideoStream() {
     el.streamView.style.display = "block";
     el.streamPlaceholder.style.display = "none";
   }
-  el.streamMeta.textContent = state.mode === "infer"
+  el.streamMeta.textContent = mode === "infer"
     ? "Qwen2.5-VL-3B 正在流式推理"
     : "YOLOv8 正在实时检测";
 
-  if (state.mode === "infer") {
+  if (mode === "infer") {
     const prompt = encodeURIComponent(el.promptInput.value.trim() || state.defaultPrompt);
     function makeInferSSE() {
       return new EventSource(
-        `/api/infer/stream?source_id=${state.sourceId}&run_id=${encodeURIComponent(state.runId)}&prompt=${prompt}`
+        `/api/infer/stream?source_id=${sourceId}&run_id=${encodeURIComponent(runId)}&prompt=${prompt}`
       );
     }
     function onInferMessage(evt) {
@@ -464,7 +519,7 @@ async function startVideoStream() {
   } else {
     function makeDetectSSE() {
       return new EventSource(
-        `/api/detect/stream?source_id=${state.sourceId}&run_id=${encodeURIComponent(state.runId)}&targets=${encodeURIComponent(el.targetInput.value.trim())}`
+        `/api/detect/stream?source_id=${sourceId}&run_id=${encodeURIComponent(runId)}&targets=${encodeURIComponent(el.targetInput.value.trim())}`
       );
     }
     function onDetectMessage(evt) {
@@ -509,21 +564,39 @@ async function startVideoStream() {
     };
   }
 
+  if (!isActionActive(actionToken)) {
+    bestEffortStopRun(sourceId, runId);
+    return;
+  }
   el.startBtn.disabled = true;
   el.stopBtn.disabled = false;
   setStatus("分析中", true);
   setLive(true);
+  releaseAction(actionToken);
 }
 
 function _is_run_active_local() {
   return !!(state.sourceId && state.runId);
 }
 
-async function uploadChunkWithRetry(url, formData, maxRetries = 3) {
+function bestEffortStopRun(sourceId, runId) {
+  if (!sourceId || !runId) return;
+  fetchJson("/api/control/stop", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ source_id: sourceId, run_id: runId }),
+  }).catch(() => {});
+}
+
+async function uploadChunkWithRetry(url, formData, maxRetries = 3, signal = null) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     let timer = null;
     try {
       const timeoutController = new AbortController();
+      if (signal) {
+        if (signal.aborted) timeoutController.abort();
+        else signal.addEventListener("abort", () => timeoutController.abort(), { once: true });
+      }
       timer = setTimeout(() => timeoutController.abort(), 20000);
       const resp = await fetch(url, {
         method: "POST",
@@ -538,6 +611,12 @@ async function uploadChunkWithRetry(url, formData, maxRetries = 3) {
       return await resp.json();
     } catch (err) {
       if (timer) clearTimeout(timer);
+      if (signal && signal.aborted) {
+        throw new Error("上传中断：检测到长时间卡住，请重新上传");
+      }
+      if (isAbortLikeError(err) && attempt === maxRetries) {
+        throw new Error("上传超时：网络可能不稳定，请重新上传");
+      }
       if (attempt === maxRetries) throw err;
       // Wait before retry: 1s, 2s, 3s...
       await new Promise(r => setTimeout(r, attempt * 1000));
@@ -546,24 +625,42 @@ async function uploadChunkWithRetry(url, formData, maxRetries = 3) {
 }
 
 async function uploadVideo() {
+  const actionToken = claimAction("upload");
   if (state.runId || state.eventSource) {
-    await stopAnalysis(true);
+    await stopAnalysis(true, false, false);
   }
+  if (!isActionActive(actionToken)) return;
 
   const file = el.videoFile.files?.[0];
   if (!file) {
     addLog("⚠ 请先选择视频文件");
+    releaseAction(actionToken);
     return;
   }
 
   el.uploadBtn.disabled = true;
   const originalText = el.uploadBtn.textContent;
   const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB per chunk
+  let watchdog = null;
+  let abortController = null;
 
   try {
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
     const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
     addLog(`⏳ 开始分片上传: ${file.name} (${sizeMB}MB, ${totalChunks} 片)`);
+    const uploadStartTs = Date.now();
+    let lastProgressTs = Date.now();
+    const fileMB = file.size / (1024 * 1024);
+    const noProgressTimeoutMs = 60000;
+    const hardTimeoutMs = Math.min(20 * 60 * 1000, Math.max(2 * 60 * 1000, Math.floor(fileMB * 4500)));
+    abortController = new AbortController();
+    state.uploadAbortController = abortController;
+    watchdog = setInterval(() => {
+      const now = Date.now();
+      if ((now - lastProgressTs) > noProgressTimeoutMs || (now - uploadStartTs) > hardTimeoutMs) {
+        abortController.abort();
+      }
+    }, 2000);
 
     // Step 1: Init upload session
     setStatus("初始化上传...", false);
@@ -583,16 +680,23 @@ async function uploadVideo() {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: initPayload,
+            signal: abortController.signal,
           },
           12000
         );
+        if (!isActionActive(actionToken)) return;
+        lastProgressTs = Date.now();
         break;
       } catch (err) {
+        if (abortController.signal.aborted) {
+          throw new Error("上传初始化卡住时间过长，请重新上传");
+        }
         if (attempt === INIT_RETRIES) throw err;
         const waitMs = 700 * attempt;
         setStatus(`初始化重试中（${attempt}/${INIT_RETRIES - 1}）...`, false);
         el.uploadBtn.textContent = `重试 ${attempt}/${INIT_RETRIES - 1}`;
         await new Promise((r) => setTimeout(r, waitMs));
+        if (!isActionActive(actionToken)) return;
       }
     }
     if (!initData || !initData.upload_id) {
@@ -609,6 +713,7 @@ async function uploadVideo() {
 
     async function uploadNext() {
       while (nextChunk < totalChunks) {
+        if (!isActionActive(actionToken)) return;
         const idx = nextChunk++;
         const start = idx * CHUNK_SIZE;
         const end = Math.min(start + CHUNK_SIZE, file.size);
@@ -620,9 +725,12 @@ async function uploadVideo() {
         try {
           await uploadChunkWithRetry(
             `/api/upload/chunk?upload_id=${encodeURIComponent(uploadId)}&chunk_index=${idx}`,
-            fd
+            fd,
+            3,
+            abortController.signal,
           );
           uploadedChunks++;
+          lastProgressTs = Date.now();
           const percent = Math.round((uploadedChunks / totalChunks) * 100);
           el.uploadBtn.textContent = `上传中 ${percent}%`;
           setStatus(`上传中 ${percent}% (${uploadedChunks}/${totalChunks})`, false);
@@ -637,6 +745,7 @@ async function uploadVideo() {
       workers.push(uploadNext());
     }
     await Promise.all(workers);
+    if (!isActionActive(actionToken)) return;
 
     if (errors.length > 0) {
       throw new Error(`${errors.length} 个分片上传失败，请重试`);
@@ -645,11 +754,34 @@ async function uploadVideo() {
     // Step 3: Complete / merge
     el.uploadBtn.textContent = "合并中...";
     setStatus("合并文件...", false);
-    const data = await fetchJson("/api/upload/complete", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ upload_id: uploadId }),
-    });
+    let data = null;
+    const COMPLETE_RETRIES = 2;
+    for (let attempt = 1; attempt <= COMPLETE_RETRIES; attempt++) {
+      try {
+        data = await fetchJsonWithTimeout(
+          "/api/upload/complete",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ upload_id: uploadId }),
+            signal: abortController.signal,
+          },
+          30000
+        );
+        lastProgressTs = Date.now();
+        break;
+      } catch (err) {
+        if (abortController.signal.aborted) {
+          throw new Error("上传合并阶段超时，请重新上传");
+        }
+        if (attempt === COMPLETE_RETRIES) throw err;
+        await new Promise((r) => setTimeout(r, 1200));
+      }
+    }
+    if (!data) {
+      throw new Error("上传合并失败，请重新上传");
+    }
+    if (!isActionActive(actionToken)) return;
 
     state.sourceId = data.source_id;
     state.sourceKind = data.kind || "file";
@@ -662,19 +794,31 @@ async function uploadVideo() {
     el.startBtn.classList.add("pulse-ready");
     setTimeout(() => el.startBtn.classList.remove("pulse-ready"), 2000);
   } finally {
+    if (watchdog) {
+      clearInterval(watchdog);
+      watchdog = null;
+    }
+    if (state.uploadAbortController) {
+      try { state.uploadAbortController.abort(); } catch {}
+      state.uploadAbortController = null;
+    }
     el.uploadBtn.disabled = false;
     el.uploadBtn.textContent = originalText;
+    releaseAction(actionToken);
   }
 }
 
 async function registerUrl() {
+  const actionToken = claimAction("connect_url");
   if (state.runId || state.eventSource) {
-    await stopAnalysis(true);
+    await stopAnalysis(true, false, false);
   }
+  if (!isActionActive(actionToken)) return;
 
   const url = el.streamUrl.value.trim();
   if (!url) {
     addLog("⚠ 请输入流媒体 URL");
+    releaseAction(actionToken);
     return;
   }
 
@@ -687,6 +831,7 @@ async function registerUrl() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url }),
     });
+    if (!isActionActive(actionToken)) return;
 
     state.sourceId = data.source_id;
     state.sourceKind = data.kind || "url";
@@ -699,17 +844,21 @@ async function registerUrl() {
     setTimeout(() => el.startBtn.classList.remove("pulse-ready"), 2000);
   } finally {
     el.urlBtn.disabled = false;
+    releaseAction(actionToken);
   }
 }
 
 async function loadLocalFile() {
+  const actionToken = claimAction("load_local");
   if (state.runId || state.eventSource) {
-    await stopAnalysis(true);
+    await stopAnalysis(true, false, false);
   }
+  if (!isActionActive(actionToken)) return;
 
   const localPath = el.localPath.value.trim();
   if (!localPath) {
     addLog("⚠ 请输入服务器上的文件路径");
+    releaseAction(actionToken);
     return;
   }
 
@@ -722,6 +871,7 @@ async function loadLocalFile() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path: localPath }),
     });
+    if (!isActionActive(actionToken)) return;
 
     state.sourceId = data.source_id;
     state.sourceKind = data.kind || "file";
@@ -734,6 +884,7 @@ async function loadLocalFile() {
     setTimeout(() => el.startBtn.classList.remove("pulse-ready"), 2000);
   } finally {
     el.localBtn.disabled = false;
+    releaseAction(actionToken);
   }
 }
 
@@ -763,9 +914,12 @@ async function boot() {
 }
 
 /* ── Event Listeners ── */
-el.sourceTypeSeg.addEventListener("click", (e) => {
+el.sourceTypeSeg.addEventListener("click", async (e) => {
   const btn = e.target.closest("button[data-source-type]");
   if (!btn) return;
+  if (state.runId || state.eventSource) {
+    await stopAnalysis(true);
+  }
   state.sourceType = btn.dataset.sourceType;
   updateSourceTypeUI();
 });
@@ -804,12 +958,12 @@ el.startBtn.addEventListener("click", async () => {
   el.startBtn.disabled = true;
   try {
     await startVideoStream();
-    el.startBtn.textContent = origText;
   } catch (err) {
     addLog(`❌ 启动失败: ${err.message}`, true);
     setStatus("启动失败", false);
-    el.startBtn.disabled = !state.sourceId;
+  } finally {
     el.startBtn.textContent = origText;
+    el.startBtn.disabled = !!state.runId || !state.sourceId;
   }
 });
 
