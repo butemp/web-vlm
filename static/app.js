@@ -17,6 +17,9 @@ const state = {
   actionToken: 0,
   activeAction: "",
   uploadAbortController: null,
+  mjpegStallTimer: null,
+  mjpegLastNaturalWidth: 0,
+  mjpegStallNotified: false,
 };
 
 const el = {
@@ -114,6 +117,43 @@ async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 15000) {
 function isHlsUrl(url) {
   if (!url) return false;
   return url.toLowerCase().includes(".m3u8");
+}
+
+function stopMjpegStallDetection() {
+  if (state.mjpegStallTimer) {
+    clearInterval(state.mjpegStallTimer);
+    state.mjpegStallTimer = null;
+  }
+  state.mjpegLastNaturalWidth = 0;
+  state.mjpegStallNotified = false;
+}
+
+function startMjpegStallDetection() {
+  stopMjpegStallDetection();
+  let unchangedTicks = 0;
+  // Poll the MJPEG img element: if its rendered size stays identical for
+  // several seconds it likely means the backend stream stopped delivering.
+  state.mjpegStallTimer = setInterval(() => {
+    if (!state.runId || !el.streamView || el.streamView.style.display === "none") {
+      return;
+    }
+    // Use naturalWidth change as a proxy — when the MJPEG stream is
+    // alive the browser keeps decoding new JPEG frames.  We additionally
+    // compare the raw element width which some browsers update per-frame.
+    const w = el.streamView.naturalWidth || el.streamView.width || 0;
+    if (w > 0 && w === state.mjpegLastNaturalWidth) {
+      unchangedTicks++;
+    } else {
+      unchangedTicks = 0;
+    }
+    state.mjpegLastNaturalWidth = w;
+    // ~8 seconds with no apparent frame change
+    if (unchangedTicks >= 8 && !state.mjpegStallNotified) {
+      state.mjpegStallNotified = true;
+      addLog("⚠ 视频流可能已中断（画面长时间未更新），建议重新点击「开始分析」", true);
+      setStatus("视频流可能已中断", false);
+    }
+  }, 1000);
 }
 
 function stopNativePlayback() {
@@ -382,6 +422,7 @@ async function stopAnalysis(
     state.eventSource.close();
     state.eventSource = null;
   }
+  stopMjpegStallDetection();
 
   if (resetToInitial) {
     resetToInitialViewState();
@@ -469,6 +510,7 @@ async function startVideoStream() {
     el.streamView.src = streamUrl;
     el.streamView.style.display = "block";
     el.streamPlaceholder.style.display = "none";
+    startMjpegStallDetection();
   }
   el.streamMeta.textContent = mode === "infer"
     ? "Qwen2.5-VL-3B 正在流式推理"
@@ -497,34 +539,32 @@ async function startVideoStream() {
     }
     state.eventSource = makeInferSSE();
     state.eventSource.onmessage = onInferMessage;
-    let inferReconnected = false;
-    state.eventSource.onerror = () => {
-      if (!inferReconnected && _is_run_active_local()) {
-        inferReconnected = true;
-        addLog("⚠ 推理流短暂中断，正在重连...", true);
-        if (state.eventSource) state.eventSource.close();
-        setTimeout(() => {
-          if (!_is_run_active_local()) return;
-          state.eventSource = makeInferSSE();
-          state.eventSource.onmessage = onInferMessage;
-          state.eventSource.onerror = () => {
-            addLog("⚠ 推理流连接中断，请重新点击「开始分析」", true);
-            setStatus("推理流中断", false);
-            setLive(false);
-            state.runId = null;
-            el.startBtn.disabled = !state.sourceId;
-            el.stopBtn.disabled = true;
-          };
-        }, 1500);
-        return;
-      }
-      addLog("⚠ 推理流连接中断，请重新点击「开始分析」", true);
-      setStatus("推理流中断", false);
-      setLive(false);
-      state.runId = null;
-      el.startBtn.disabled = !state.sourceId;
-      el.stopBtn.disabled = true;
-    };
+    const MAX_SSE_RECONNECTS = 3;
+    let inferReconnects = 0;
+    function attachInferErrorHandler() {
+      state.eventSource.onerror = () => {
+        if (inferReconnects < MAX_SSE_RECONNECTS && _is_run_active_local()) {
+          inferReconnects++;
+          const backoff = 1500 * inferReconnects;
+          addLog(`⚠ 推理流短暂中断，正在重连(${inferReconnects}/${MAX_SSE_RECONNECTS})...`, true);
+          if (state.eventSource) state.eventSource.close();
+          setTimeout(() => {
+            if (!_is_run_active_local()) return;
+            state.eventSource = makeInferSSE();
+            state.eventSource.onmessage = onInferMessage;
+            attachInferErrorHandler();
+          }, backoff);
+          return;
+        }
+        addLog("⚠ 推理流连接中断，请重新点击「开始分析」", true);
+        setStatus("推理流中断", false);
+        setLive(false);
+        state.runId = null;
+        el.startBtn.disabled = !state.sourceId;
+        el.stopBtn.disabled = true;
+      };
+    }
+    attachInferErrorHandler();
   } else {
     function makeDetectSSE() {
       return new EventSource(
@@ -543,34 +583,32 @@ async function startVideoStream() {
     }
     state.eventSource = makeDetectSSE();
     state.eventSource.onmessage = onDetectMessage;
-    let detectReconnected = false;
-    state.eventSource.onerror = () => {
-      if (!detectReconnected && _is_run_active_local()) {
-        detectReconnected = true;
-        addLog("⚠ 检测流短暂中断，正在重连...", true);
-        if (state.eventSource) state.eventSource.close();
-        setTimeout(() => {
-          if (!_is_run_active_local()) return;
-          state.eventSource = makeDetectSSE();
-          state.eventSource.onmessage = onDetectMessage;
-          state.eventSource.onerror = () => {
-            addLog("⚠ 检测流连接中断，请重新点击「开始分析」", true);
-            setStatus("检测流中断", false);
-            setLive(false);
-            state.runId = null;
-            el.startBtn.disabled = !state.sourceId;
-            el.stopBtn.disabled = true;
-          };
-        }, 1500);
-        return;
-      }
-      addLog("⚠ 检测流连接中断，请重新点击「开始分析」", true);
-      setStatus("检测流中断", false);
-      setLive(false);
-      state.runId = null;
-      el.startBtn.disabled = !state.sourceId;
-      el.stopBtn.disabled = true;
-    };
+    const MAX_DETECT_RECONNECTS = 3;
+    let detectReconnects = 0;
+    function attachDetectErrorHandler() {
+      state.eventSource.onerror = () => {
+        if (detectReconnects < MAX_DETECT_RECONNECTS && _is_run_active_local()) {
+          detectReconnects++;
+          const backoff = 1500 * detectReconnects;
+          addLog(`⚠ 检测流短暂中断，正在重连(${detectReconnects}/${MAX_DETECT_RECONNECTS})...`, true);
+          if (state.eventSource) state.eventSource.close();
+          setTimeout(() => {
+            if (!_is_run_active_local()) return;
+            state.eventSource = makeDetectSSE();
+            state.eventSource.onmessage = onDetectMessage;
+            attachDetectErrorHandler();
+          }, backoff);
+          return;
+        }
+        addLog("⚠ 检测流连接中断，请重新点击「开始分析」", true);
+        setStatus("检测流中断", false);
+        setLive(false);
+        state.runId = null;
+        el.startBtn.disabled = !state.sourceId;
+        el.stopBtn.disabled = true;
+      };
+    }
+    attachDetectErrorHandler();
   }
 
   if (!isActionActive(actionToken)) {

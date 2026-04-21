@@ -79,6 +79,9 @@ YOLO_LIVE_STREAM_INFER_INTERVAL_SEC = 0.75
 STREAM_MAX_EDGE = 720
 STREAM_JPEG_QUALITY = 65
 STREAM_TARGET_FPS = 25
+LIVE_STREAM_MAX_EDGE = 540
+LIVE_STREAM_JPEG_QUALITY = 55
+LIVE_STREAM_TARGET_FPS = 20
 DETECT_STREAM_MAX_EDGE = 540
 DETECT_STREAM_TARGET_FPS = 20
 LIVE_DETECT_STREAM_MAX_EDGE = 512
@@ -110,10 +113,15 @@ _infer_frame_cache: Dict[str, Dict[str, object]] = {}
 
 _active_runs_lock = threading.Lock()
 _active_runs: Dict[str, str] = {}
+_ffmpeg_env_lock = threading.Lock()
 
 # Separate executor for JPEG encoding so it doesn't compete with YOLO/Qwen inference
 _encode_executor = concurrent.futures.ThreadPoolExecutor(
     max_workers=3, thread_name_prefix="jpeg-enc"
+)
+# Separate executor for YOLO detection to avoid starving the default asyncio pool
+_yolo_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="yolo-det"
 )
 
 app = FastAPI(title="Realtime Video Inference Demo", version="0.2.0")
@@ -190,21 +198,29 @@ def _open_capture(source_id: str) -> cv2.VideoCapture:
     value = source["value"]
 
     ffmpeg_options = _build_ffmpeg_capture_options(value)
-    if ffmpeg_options:
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = ffmpeg_options
 
-    open_t0 = time.monotonic()
-    cap = cv2.VideoCapture(value, cv2.CAP_FFMPEG)
-    if not cap.isOpened():
-        cap = cv2.VideoCapture(value, cv2.CAP_ANY)
+    with _ffmpeg_env_lock:
+        if ffmpeg_options:
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = ffmpeg_options
+        else:
+            os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
+
+        open_t0 = time.monotonic()
+        cap = cv2.VideoCapture(value, cv2.CAP_FFMPEG)
+        if not cap.isOpened():
+            cap = cv2.VideoCapture(value, cv2.CAP_ANY)
     if not cap.isOpened():
         raise ValueError(f"无法打开视频源: {value}")
     # Optimize capture settings for smoother playback
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)
-    # For network streams, set longer timeouts
-    if value.startswith(("http://", "https://", "rtsp://")):
-        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, NETWORK_OPEN_TIMEOUT_MSEC)
-        cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, NETWORK_READ_TIMEOUT_MSEC)
+    try:
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 3)
+        # For network streams, set longer timeouts
+        if value.startswith(("http://", "https://", "rtsp://")):
+            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, NETWORK_OPEN_TIMEOUT_MSEC)
+            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, NETWORK_READ_TIMEOUT_MSEC)
+    except Exception:
+        cap.release()
+        raise
     logger.info(
         "视频源打开成功 source=%s kind=%s open_cost=%.2fs ffmpeg_opts=%s",
         _short_id(source_id),
@@ -448,6 +464,10 @@ def _resize_for_vlm(frame: np.ndarray, max_edge: int = QWEN_MAX_IMAGE_EDGE) -> n
 class ThreadedFrameReader:
     """Background thread video reader with frame queue for smooth playback."""
 
+    STREAM_CONSECUTIVE_FAIL_LIMIT = 50
+    STREAM_MAX_RECONNECTS = 5
+    STREAM_RECONNECT_BACKOFF_SEC = 1.0
+
     def __init__(
         self,
         cap: cv2.VideoCapture,
@@ -455,27 +475,54 @@ class ThreadedFrameReader:
         skip_frames: int = 0,
         is_file: bool = False,
         drop_if_full: bool = True,
+        source_id: str = "",
     ):
         self.cap = cap
         self.skip_frames = skip_frames
         self.is_file = is_file
         self.drop_if_full = drop_if_full
+        self.source_id = source_id
         self.queue: queue.Queue = queue.Queue(maxsize=queue_size)
         self.stopped = False
         self.thread = threading.Thread(target=self._reader_loop, daemon=True)
         self.thread.start()
 
+    def _try_reconnect(self) -> bool:
+        """Attempt to reopen the capture for network streams."""
+        try:
+            self.cap.release()
+        except Exception:
+            pass
+        try:
+            new_cap = _open_capture(self.source_id)
+            self.cap = new_cap
+            logger.info(
+                "读帧线程重连成功 source=%s", _short_id(self.source_id)
+            )
+            return True
+        except Exception as exc:
+            logger.warning(
+                "读帧线程重连失败 source=%s err=%s",
+                _short_id(self.source_id),
+                exc,
+            )
+            return False
+
     def _reader_loop(self):
         retry_count = 0
         max_retries = 3
+        stream_consecutive_fails = 0
+        stream_reconnects = 0
         while not self.stopped:
             if self.queue.full():
                 if self.drop_if_full:
-                    # Live streams prefer low latency: drop oldest frame when backlogged.
-                    try:
-                        self.queue.get_nowait()
-                    except queue.Empty:
-                        pass
+                    # Live streams prefer low latency: drain all stale frames
+                    # so downstream always sees the most recent frame.
+                    while not self.queue.empty():
+                        try:
+                            self.queue.get_nowait()
+                        except queue.Empty:
+                            break
                 else:
                     # File playback prefers stable speed: apply backpressure and do not drop.
                     time.sleep(0.002)
@@ -502,11 +549,46 @@ class ThreadedFrameReader:
                     self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     continue
                 else:
-                    # Network stream failed, try to continue
-                    time.sleep(0.05)
+                    # Network stream: track consecutive failures and attempt reconnect
+                    stream_consecutive_fails += 1
+                    if stream_consecutive_fails >= self.STREAM_CONSECUTIVE_FAIL_LIMIT:
+                        if stream_reconnects >= self.STREAM_MAX_RECONNECTS:
+                            logger.warning(
+                                "读帧线程放弃重连 source=%s reconnects=%d",
+                                _short_id(self.source_id),
+                                stream_reconnects,
+                            )
+                            self.stopped = True
+                            try:
+                                self.queue.put_nowait((False, None, -1.0))
+                            except queue.Full:
+                                pass
+                            return
+                        backoff = self.STREAM_RECONNECT_BACKOFF_SEC * (
+                            stream_reconnects + 1
+                        )
+                        logger.info(
+                            "读帧线程连续失败 source=%s fails=%d, %.1fs后尝试重连(%d/%d)",
+                            _short_id(self.source_id),
+                            stream_consecutive_fails,
+                            backoff,
+                            stream_reconnects + 1,
+                            self.STREAM_MAX_RECONNECTS,
+                        )
+                        time.sleep(backoff)
+                        if self.stopped:
+                            return
+                        if self._try_reconnect():
+                            stream_consecutive_fails = 0
+                            stream_reconnects += 1
+                        else:
+                            stream_reconnects += 1
+                    else:
+                        time.sleep(0.05)
                     continue
 
             retry_count = 0
+            stream_consecutive_fails = 0
             pos_msec = float(self.cap.get(cv2.CAP_PROP_POS_MSEC))
             if np.isnan(pos_msec) or pos_msec < 0:
                 pos_msec = -1.0
@@ -515,20 +597,17 @@ class ThreadedFrameReader:
             except queue.Full:
                 pass
 
-    def read(self) -> tuple[bool, Optional[np.ndarray], float]:
+    def read(self, timeout: float = 0.015) -> tuple[bool, Optional[np.ndarray], float]:
         if self.stopped and self.queue.empty():
             return False, None, -1.0
         try:
-            return self.queue.get_nowait()
+            return self.queue.get(timeout=timeout)
         except queue.Empty:
             return False, None, -1.0
 
     def stop(self):
         self.stopped = True
-        try:
-            self.cap.release()
-        except Exception:
-            pass
+        # Join the reader thread FIRST so it exits cap.read() before we release.
         if self.thread.is_alive():
             join_timeout = max(
                 0.8,
@@ -540,6 +619,10 @@ class ThreadedFrameReader:
                     "读帧线程未及时退出，后续将由后台超时回收 thread=%s",
                     self.thread.name,
                 )
+        try:
+            self.cap.release()
+        except Exception:
+            pass
 
 
 def _grab_and_read_frame(cap: cv2.VideoCapture, n_skip: int) -> tuple[bool, np.ndarray]:
@@ -1243,7 +1326,7 @@ async def video_stream(
 
         try:
             cap = await loop.run_in_executor(None, _open_capture, source_id)
-        except ValueError as exc:
+        except Exception as exc:
             logger.warning("打开视频源失败: %s", exc)
             open_fail = True
             return
@@ -1259,6 +1342,8 @@ async def video_stream(
         if mode == "detect" and (not is_file):
             # Live-stream detection is CPU/GPU heavy; cap render FPS harder for smoothness.
             base_target_fps = min(base_target_fps, float(LIVE_DETECT_STREAM_TARGET_FPS))
+        elif mode == "infer" and (not is_file):
+            base_target_fps = min(base_target_fps, float(LIVE_STREAM_TARGET_FPS))
 
         target_fps = min(base_target_fps, fps)
         frame_step = max(0, int(round(fps / target_fps)) - 1) if fps > target_fps else 0
@@ -1274,12 +1359,14 @@ async def video_stream(
         display_max_edge = (
             LIVE_DETECT_STREAM_MAX_EDGE
             if (mode == "detect" and (not is_file))
-            else (DETECT_STREAM_MAX_EDGE if mode == "detect" else STREAM_MAX_EDGE)
+            else (DETECT_STREAM_MAX_EDGE if mode == "detect"
+                  else (LIVE_STREAM_MAX_EDGE if (not is_file) else STREAM_MAX_EDGE))
         )
         display_jpeg_quality = (
             LIVE_DETECT_JPEG_QUALITY
             if (mode == "detect" and (not is_file))
-            else STREAM_JPEG_QUALITY
+            else (LIVE_STREAM_JPEG_QUALITY if (mode == "infer" and (not is_file))
+                  else STREAM_JPEG_QUALITY)
         )
 
         # Use threaded reader for smoother frame acquisition
@@ -1298,6 +1385,7 @@ async def video_stream(
             skip_frames=frame_step,
             is_file=is_file,
             drop_if_full=drop,
+            source_id=source_id,
         )
         logger.info(
             "视频流启动 source=%s run=%s mode=%s src_fps=%.2f target_fps=%.2f step=%d qsize=%d is_file=%s detect_interval=%.2fs detect_imgsz=%d edge=%d q=%d",
@@ -1341,7 +1429,8 @@ async def video_stream(
                     if reader.stopped:
                         break
                     miss_reads += 1
-                    await asyncio.sleep(0.002)
+                    # reader.read() already blocks up to 15ms; yield control briefly.
+                    await asyncio.sleep(0)
                     continue
 
                 frame_idx += 1
@@ -1380,7 +1469,7 @@ async def video_stream(
                         # Use resized frame for YOLO detection
                         detect_input = _resize_by_max_edge(frame, max_edge=detect_imgsz)
                         detect_future = loop.run_in_executor(
-                            None,
+                            _yolo_executor,
                             _yolo_detect,
                             detect_input,
                             target_list,
@@ -1449,7 +1538,7 @@ async def video_stream(
                     remaining = frame_deadline - time.monotonic()
                     if remaining > 0:
                         await asyncio.sleep(remaining)
-                    elif remaining < -0.5:
+                    elif remaining < -0.15:
                         frame_deadline = time.monotonic()
         finally:
             if detect_future is not None and (not detect_future.done()):
