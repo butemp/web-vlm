@@ -51,12 +51,12 @@
             </div>
             <div id="uploadPanel" class="source-panel">
               <label class="file-drop" id="fileDrop">
-                <input type="file" id="videoFile" accept="video/*" hidden />
+                <input type="file" id="videoFile" accept="video/*" multiple hidden />
                 <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.4"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-                <span class="file-drop-text" id="fileDropText">点击或拖拽视频文件</span>
-                <span class="file-drop-hint">MP4 / AVI / MKV, max 500MB</span>
+                <span class="file-drop-text" id="fileDropText">点击或拖拽一个或多个视频文件</span>
+                <span class="file-drop-hint">MP4 / AVI / MKV, 每个文件 max 500MB</span>
               </label>
-              <button id="uploadBtn" class="btn btn-primary btn-block">上传并加载</button>
+              <button id="uploadBtn" class="btn btn-primary btn-block">上传并加载所选视频</button>
             </div>
             <div id="urlPanel" class="source-panel hidden">
               <div class="input-group">

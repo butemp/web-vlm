@@ -386,6 +386,36 @@ function getNextAvailablePanel() {
   return 0; // replace oldest
 }
 
+function getTargetPanelsForFiles(fileCount) {
+  const emptyPanels = [];
+  const occupiedPanels = [];
+
+  for (let i = 0; i < PANEL_COUNT; i++) {
+    if (state.panels[i].sourceId) {
+      occupiedPanels.push(i);
+    } else {
+      emptyPanels.push(i);
+    }
+  }
+
+  return [...emptyPanels, ...occupiedPanels].slice(0, fileCount);
+}
+
+function describeSelectedFiles(files) {
+  if (!files || files.length === 0) {
+    return "点击或拖拽一个或多个视频文件";
+  }
+  if (files.length === 1) {
+    return files[0].name;
+  }
+  return `已选择 ${files.length} 个文件`;
+}
+
+function updateSelectedFilesLabel(files) {
+  if (!el.fileDropText) return;
+  el.fileDropText.textContent = describeSelectedFiles(files);
+}
+
 function updateButtonStates() {
   const anySource = state.panels.some(p => p.sourceId);
   const anyRunning = state.panels.some(p => p.runId);
@@ -438,7 +468,7 @@ function resetToInitialViewState() {
   el.streamUrl.value = "";
   el.localPath.value = "";
   if (el.videoFile) el.videoFile.value = "";
-  if (el.fileDropText) el.fileDropText.textContent = "点击或拖拽视频文件";
+  updateSelectedFilesLabel([]);
 
   setStatus("等待连接", false);
   el.startBtn.disabled = true;
@@ -760,28 +790,9 @@ async function uploadChunkWithRetry(url, formData, maxRetries = 3, signal = null
   }
 }
 
-async function uploadVideo() {
-  const actionToken = claimAction("upload");
-  // Get target panel
-  const panelIdx = getNextAvailablePanel();
+async function uploadSingleVideoToPanel(file, panelIdx, actionToken, fileIndex, totalFiles) {
   const p = state.panels[panelIdx];
   const pe = el.panels[panelIdx];
-
-  // Stop existing run for this panel if active
-  if (p.runId || p.eventSource) {
-    await stopAnalysisForPanel(panelIdx, true, true);
-  }
-  if (!isActionActive(actionToken)) return;
-
-  const file = el.videoFile.files?.[0];
-  if (!file) {
-    addLog("⚠ 请先选择视频文件", panelIdx);
-    releaseAction(actionToken);
-    return;
-  }
-
-  el.uploadBtn.disabled = true;
-  const originalText = el.uploadBtn.textContent;
   const CHUNK_SIZE = 2 * 1024 * 1024;
   let watchdog = null;
   let abortController = null;
@@ -789,7 +800,11 @@ async function uploadVideo() {
   try {
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
     const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
-    addLog(`⏳ 开始分片上传: ${file.name} (${sizeMB}MB, ${totalChunks} 片)`, panelIdx);
+    const batchPrefix = totalFiles > 1 ? `[${fileIndex + 1}/${totalFiles}] ` : "";
+    addLog(
+      `⏳ ${batchPrefix}开始分片上传: ${file.name} (${sizeMB}MB, ${totalChunks} 片)`,
+      panelIdx
+    );
     const uploadStartTs = Date.now();
     let lastProgressTs = Date.now();
     const fileMB = file.size / (1024 * 1024);
@@ -805,8 +820,8 @@ async function uploadVideo() {
     }, 2000);
 
     // Step 1: Init upload session
-    setStatus("初始化上传...", false);
-    el.uploadBtn.textContent = "初始化...";
+    setStatus(`初始化上传 ${fileIndex + 1}/${totalFiles}...`, false);
+    el.uploadBtn.textContent = totalFiles > 1 ? `初始化 ${fileIndex + 1}/${totalFiles}` : "初始化...";
     let initData = null;
     const initPayload = JSON.stringify({
       filename: file.name,
@@ -835,8 +850,8 @@ async function uploadVideo() {
         }
         if (attempt === INIT_RETRIES) throw err;
         const waitMs = 700 * attempt;
-        setStatus(`初始化重试中（${attempt}/${INIT_RETRIES - 1}）...`, false);
-        el.uploadBtn.textContent = `重试 ${attempt}/${INIT_RETRIES - 1}`;
+        setStatus(`初始化重试 ${fileIndex + 1}/${totalFiles}（${attempt}/${INIT_RETRIES - 1}）...`, false);
+        el.uploadBtn.textContent = `重试 ${fileIndex + 1}/${totalFiles}`;
         await new Promise((r) => setTimeout(r, waitMs));
         if (!isActionActive(actionToken)) return;
       }
@@ -873,8 +888,13 @@ async function uploadVideo() {
           uploadedChunks++;
           lastProgressTs = Date.now();
           const percent = Math.round((uploadedChunks / totalChunks) * 100);
-          el.uploadBtn.textContent = `上传中 ${percent}%`;
-          setStatus(`上传中 ${percent}% (${uploadedChunks}/${totalChunks})`, false);
+          el.uploadBtn.textContent = totalFiles > 1
+            ? `上传 ${fileIndex + 1}/${totalFiles} ${percent}%`
+            : `上传中 ${percent}%`;
+          setStatus(
+            `上传 ${fileIndex + 1}/${totalFiles}: ${percent}% (${uploadedChunks}/${totalChunks})`,
+            false
+          );
         } catch (err) {
           errors.push({ idx, err });
         }
@@ -893,8 +913,8 @@ async function uploadVideo() {
     }
 
     // Step 3: Complete / merge
-    el.uploadBtn.textContent = "合并中...";
-    setStatus("合并文件...", false);
+    el.uploadBtn.textContent = totalFiles > 1 ? `合并 ${fileIndex + 1}/${totalFiles}` : "合并中...";
+    setStatus(`合并文件 ${fileIndex + 1}/${totalFiles}...`, false);
     let data = null;
     const COMPLETE_RETRIES = 2;
     for (let attempt = 1; attempt <= COMPLETE_RETRIES; attempt++) {
@@ -929,11 +949,9 @@ async function uploadVideo() {
     p.playbackUrl = data.playback_url || "";
     pe.streamMeta.textContent = `来源: ${data.name} (${data.size_mb || "?"}MB)`;
     pe.sourceName.textContent = `— ${data.name}`;
-    setStatus("视频已就绪", true);
     addLog(`✓ 已加载: ${data.name} (${data.size_mb}MB)`, panelIdx);
     updateButtonStates();
-    el.startBtn.classList.add("pulse-ready");
-    setTimeout(() => el.startBtn.classList.remove("pulse-ready"), 2000);
+    return data;
   } finally {
     if (watchdog) {
       clearInterval(watchdog);
@@ -943,6 +961,77 @@ async function uploadVideo() {
       try { state.uploadAbortController.abort(); } catch {}
       state.uploadAbortController = null;
     }
+  }
+}
+
+async function uploadVideo() {
+  const actionToken = claimAction("upload");
+  const panelIdx = getNextAvailablePanel();
+  const files = Array.from(el.videoFile.files || []);
+
+  if (files.length === 0) {
+    addLog("⚠ 请先选择视频文件", panelIdx);
+    releaseAction(actionToken);
+    return;
+  }
+
+  const selectedFiles = files.slice(0, PANEL_COUNT);
+  const targetPanels = getTargetPanelsForFiles(selectedFiles.length);
+
+  if (files.length > PANEL_COUNT) {
+    addLog(
+      `⚠ 当前最多同时加载 ${PANEL_COUNT} 个视频，已使用前 ${selectedFiles.length} 个文件`,
+      targetPanels[0] ?? 0,
+      true
+    );
+  }
+
+  el.uploadBtn.disabled = true;
+  const originalText = el.uploadBtn.textContent;
+  let successCount = 0;
+  let firstError = null;
+
+  try {
+    for (let i = 0; i < targetPanels.length; i++) {
+      const targetPanelIdx = targetPanels[i];
+      const file = selectedFiles[i];
+      const p = state.panels[targetPanelIdx];
+
+      if (p.runId || p.eventSource) {
+        await stopAnalysisForPanel(targetPanelIdx, true, true);
+      }
+      if (!isActionActive(actionToken)) return;
+
+      try {
+        await uploadSingleVideoToPanel(
+          file,
+          targetPanelIdx,
+          actionToken,
+          i,
+          selectedFiles.length
+        );
+        successCount += 1;
+      } catch (err) {
+        if (!firstError) firstError = err;
+        addLog(`❌ 上传失败: ${file.name} - ${err.message}`, targetPanelIdx, true);
+      }
+    }
+
+    if (!isActionActive(actionToken)) return;
+
+    if (successCount > 0) {
+      setStatus(
+        successCount === selectedFiles.length
+          ? `${successCount} 个视频已就绪`
+          : `已就绪 ${successCount}/${selectedFiles.length} 个视频`,
+        true
+      );
+      el.startBtn.classList.add("pulse-ready");
+      setTimeout(() => el.startBtn.classList.remove("pulse-ready"), 2000);
+    } else if (firstError) {
+      throw firstError;
+    }
+  } finally {
     el.uploadBtn.disabled = false;
     el.uploadBtn.textContent = originalText;
     releaseAction(actionToken);
@@ -1060,6 +1149,7 @@ async function boot() {
   updateModeUI();
   el.startBtn.disabled = true;
   el.stopBtn.disabled = true;
+  updateSelectedFilesLabel([]);
 
   for (let i = 0; i < PANEL_COUNT; i++) {
     addLog("欢迎使用 Video Intelligence Studio。请先接入视频源，然后点击「开始分析」。", i);
@@ -1173,13 +1263,11 @@ el.fileDrop.addEventListener("drop", (e) => {
   el.fileDrop.classList.remove("dragover");
   if (e.dataTransfer.files.length > 0) {
     el.videoFile.files = e.dataTransfer.files;
-    el.fileDropText.textContent = e.dataTransfer.files[0].name;
+    updateSelectedFilesLabel(Array.from(e.dataTransfer.files));
   }
 });
 el.videoFile.addEventListener("change", () => {
-  if (el.videoFile.files[0]) {
-    el.fileDropText.textContent = el.videoFile.files[0].name;
-  }
+  updateSelectedFilesLabel(Array.from(el.videoFile.files || []));
 });
 
 window.addEventListener("beforeunload", () => {
