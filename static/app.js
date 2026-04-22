@@ -57,6 +57,7 @@ const el = {
   modeTag: document.getElementById("modeTag"),
   fileDrop: document.getElementById("fileDrop"),
   fileDropText: document.getElementById("fileDropText"),
+  uploadFeedback: document.getElementById("uploadFeedback"),
   themeToggleBtn: document.getElementById("themeToggleBtn"),
   panels: [],
 };
@@ -259,6 +260,12 @@ async function tryStartDirectPlayback(panelIdx) {
   const pe = el.panels[panelIdx];
   if (!pe.streamPlayer) return false;
 
+  // Reliability first: infer mode uses backend MJPEG so display and inference
+  // stay on the same server-side decode path.
+  if (state.mode === "infer") {
+    return false;
+  }
+
   const sourceKind = p.sourceKind || "";
   const playbackUrl = p.playbackUrl || "";
   if (!playbackUrl) return false;
@@ -456,6 +463,12 @@ function updateSelectedFilesLabel(files) {
   el.fileDropText.textContent = describeSelectedFiles(files);
 }
 
+function setUploadFeedback(text = "", visible = true) {
+  if (!el.uploadFeedback) return;
+  el.uploadFeedback.textContent = text;
+  el.uploadFeedback.classList.toggle("hidden", !visible || !text);
+}
+
 function updateButtonStates() {
   const anySource = state.panels.some(p => p.sourceId);
   const anyRunning = state.panels.some(p => p.runId);
@@ -509,6 +522,7 @@ function resetToInitialViewState() {
   el.localPath.value = "";
   if (el.videoFile) el.videoFile.value = "";
   updateSelectedFilesLabel([]);
+  setUploadFeedback("", false);
 
   setStatus("等待连接", false);
   el.startBtn.disabled = true;
@@ -1190,6 +1204,7 @@ async function boot() {
   el.startBtn.disabled = true;
   el.stopBtn.disabled = true;
   updateSelectedFilesLabel([]);
+  setUploadFeedback("", false);
 
   for (let i = 0; i < PANEL_COUNT; i++) {
     addLog("欢迎使用 Video Intelligence Studio。请先接入视频源，然后点击「开始分析」。", i);

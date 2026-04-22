@@ -1443,6 +1443,15 @@ async def video_stream(
                 frame_pos_msec = pos_msec
                 if frame_pos_msec < 0 and is_file and fps > 1:
                     frame_pos_msec = (frame_idx - 1) * (1000.0 / fps)
+                if mode == "infer" and frame_idx % INFER_CACHE_EVERY_N_FRAMES == 0:
+                    infer_frame = _resize_by_max_edge(frame, max_edge=QWEN_MAX_IMAGE_EDGE)
+                    with _infer_frame_cache_lock:
+                        _infer_frame_cache[source_id] = {
+                            "run_id": run_id,
+                            "frame": frame_idx,
+                            "image": infer_frame.copy(),
+                            "ts": time.time(),
+                        }
                 if mode == "detect":
                     if detect_future is not None and detect_future.done():
                         try:
