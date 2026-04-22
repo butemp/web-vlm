@@ -1296,6 +1296,7 @@ async def control_stop_all() -> JSONResponse:
 
 @app.get("/api/stream/{source_id}")
 async def video_stream(
+    request: Request,
     source_id: str,
     run_id: str = Query(...),
     mode: str = Query("infer", pattern="^(infer|detect)$"),
@@ -1429,6 +1430,13 @@ async def video_stream(
             while True:
                 if not _is_run_active(source_id, run_id):
                     break
+                if await request.is_disconnected():
+                    logger.info(
+                        "视频流客户端断开 source=%s run=%s",
+                        _short_id(source_id),
+                        _short_id(run_id),
+                    )
+                    break
 
                 ret, frame, pos_msec = reader.read()
                 if not ret or frame is None:
@@ -1559,7 +1567,13 @@ async def video_stream(
             if detect_future is not None and (not detect_future.done()):
                 detect_future.cancel()
             if reader:
-                reader.stop()
+                # Run cleanup in a background thread to avoid blocking the
+                # asyncio event loop (reader.stop joins the read thread which
+                # can block for several seconds on network sources).
+                _reader_ref = reader
+                threading.Thread(
+                    target=_reader_ref.stop, daemon=True, name="reader-cleanup"
+                ).start()
             if not open_fail:
                 total = max(1e-6, time.monotonic() - stream_start)
                 logger.info(

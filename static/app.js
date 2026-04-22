@@ -273,19 +273,9 @@ async function tryStartDirectPlayback(panelIdx) {
   stopNativePlayback(panelIdx);
   const player = pe.streamPlayer;
 
+  // Both infer and detect modes for file sources use backend MJPEG to keep
+  // server-side decode path and frontend display in sync.
   if (sourceKind === "file") {
-    if (state.mode !== "infer") {
-      return false;
-    }
-
-    player.src = playbackUrl;
-    player.style.display = "block";
-    const started = await attemptPlayerStart(player, 2500);
-    if (started || player.readyState >= 2) {
-      return true;
-    }
-    console.warn(`Panel ${panelIdx}: Native file playback timed out, fallback to MJPEG`);
-    player.style.display = "none";
     return false;
   }
 
@@ -546,7 +536,7 @@ function resetPanelViewState(panelIdx) {
   p.playbackUrl = "";
 
   stopNativePlayback(panelIdx);
-  pe.streamView.removeAttribute("src");
+  pe.streamView.src = "";
   pe.streamView.style.display = "none";
   pe.streamPlaceholder.style.display = "flex";
   pe.streamMeta.textContent = "等待输入视频源";
@@ -616,7 +606,7 @@ async function stopAnalysisForPanel(panelIdx, notifyBackend = true, waitBackendS
 
   p.runId = null;
   stopNativePlayback(panelIdx);
-  pe.streamView.removeAttribute("src");
+  pe.streamView.src = "";
   pe.streamView.style.display = "none";
   pe.streamPlaceholder.style.display = "flex";
   pe.streamMeta.textContent = p.sourceId ? "分析已暂停" : "等待输入视频源";
@@ -668,9 +658,9 @@ async function startPanelStream(panelIdx, actionToken, mode) {
 
   if (!p.sourceId) return;
 
-  // Stop existing run for this panel if any
+  // Stop existing run for this panel if any (fire-and-forget to backend)
   if (p.runId || p.eventSource) {
-    await stopAnalysisForPanel(panelIdx, true, true);
+    await stopAnalysisForPanel(panelIdx, true, false);
   }
   if (!isActionActive(actionToken)) return;
 
@@ -703,11 +693,11 @@ async function startPanelStream(panelIdx, actionToken, mode) {
   if (!isActionActive(actionToken) || sourceId !== p.sourceId || runId !== p.runId) {
     bestEffortStopRun(sourceId, runId);
     stopNativePlayback(panelIdx);
-    pe.streamView.removeAttribute("src");
+    pe.streamView.src = "";
     return;
   }
   if (useDirectPlayback) {
-    pe.streamView.removeAttribute("src");
+    pe.streamView.src = "";
     pe.streamView.style.display = "none";
     pe.streamPlaceholder.style.display = "none";
   } else {
@@ -834,10 +824,11 @@ async function startAllStreams() {
     return;
   }
 
-  // Stop any currently running panels first
+  // Stop any currently running panels first (don't wait for backend – the new
+  // _start_run on the server will overwrite the old run for the same source).
   for (let i = 0; i < PANEL_COUNT; i++) {
     if (state.panels[i].runId || state.panels[i].eventSource) {
-      await stopAnalysisForPanel(i, true, true);
+      await stopAnalysisForPanel(i, true, false);
     }
   }
   if (!isActionActive(actionToken)) return;
