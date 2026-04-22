@@ -561,10 +561,58 @@ body[data-theme="light"] .bg-blob {
   gap: 8px;
 }
 
-/* ── Video Panel - 核心播放区 ── */
-.panel-video {
+/* ── Video Panel Wrapper — dual-panel stacked layout ── */
+.panel-video-wrapper {
   display: flex;
   flex-direction: column;
+  overflow: hidden;
+}
+
+.video-panels-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  flex: 1;
+  padding: 6px;
+}
+
+.video-panels-container::-webkit-scrollbar {
+  width: 4px;
+}
+
+.video-panels-container::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.video-panels-container::-webkit-scrollbar-thumb {
+  background: var(--glass-border-hover);
+  border-radius: var(--radius-full);
+}
+
+.video-panels-container::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+.video-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  overflow: hidden;
+  transition: border-color var(--transition-fast);
+}
+
+.video-panel:hover {
+  border-color: var(--glass-border-hover);
+}
+
+.source-name {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-weight: 500;
 }
 
 .video-header {
@@ -632,19 +680,19 @@ body[data-theme="light"] .bg-blob {
   overflow: hidden;
   background: #000;
   border: 1px solid var(--glass-border);
-  min-height: 400px;
+  min-height: 240px;
   /* 电影感边框光效 */
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02),
               0 4px 20px rgba(0, 0, 0, 0.4);
 }
 
-#streamView,
-#streamPlayer {
+.video-panel video[id^="streamPlayer"],
+.video-panel img[id^="streamView"] {
   width: 100%;
   height: 100%;
   object-fit: contain;
   display: none;
-  min-height: 400px;
+  min-height: 240px;
   background: #000;
 }
 
@@ -734,6 +782,14 @@ body[data-theme="light"] .bg-blob {
   overflow-y: auto;
   min-height: 160px;
   max-height: calc(100vh - 380px);
+}
+
+/* Per-panel inline log box */
+.panel-log-box {
+  flex: 0 0 auto;
+  min-height: 80px;
+  max-height: 150px;
+  margin: 0 10px 10px;
 }
 
 /* Custom Scrollbar */
@@ -846,41 +902,52 @@ body[data-theme="light"] .bg-blob {
     grid-template-columns: 1fr;
     grid-template-rows: auto 1fr auto;
   }
-  
+
   .panel-controls {
     order: 0;
   }
-  
-  .panel-video {
+
+  .panel-video-wrapper {
     order: 1;
     min-height: 45vh;
   }
-  
+
   .panel-output {
     order: 2;
   }
-  
+
   .panel-inner {
     flex-direction: row;
     flex-wrap: wrap;
   }
-  
+
   .ctrl-section {
     flex: 1;
     min-width: 180px;
   }
-  
+
   .ctrl-actions {
     flex-direction: row;
     min-width: 100%;
   }
-  
+
   .ctrl-actions .btn {
     flex: 1;
   }
-  
+
   .log-box {
     max-height: 280px;
+  }
+
+  .video-container,
+  .video-panel video[id^="streamPlayer"],
+  .video-panel img[id^="streamView"] {
+    min-height: 200px;
+  }
+
+  .panel-log-box {
+    max-height: 120px;
+    min-height: 60px;
   }
 }
 
@@ -913,9 +980,14 @@ body[data-theme="light"] .bg-blob {
   }
   
   .video-container,
-  #streamView,
-  #streamPlayer {
-    min-height: 220px;
+  .video-panel video[id^="streamPlayer"],
+  .video-panel img[id^="streamView"] {
+    min-height: 180px;
+  }
+
+  .panel-log-box {
+    max-height: 100px;
+    min-height: 50px;
   }
   
   .prompt-actions {

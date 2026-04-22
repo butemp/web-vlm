@@ -59,6 +59,7 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 DEFAULT_PROMPT = "请简单描述一下这个视频"
 MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500 MB
+MAX_CONCURRENT_RUNS = 2
 
 # ---------------------------------------------------------------------------
 # Hardcoded model paths (edit here before deploying).
@@ -242,8 +243,15 @@ def _safe_filename(name: str) -> str:
 def _start_run(source_id: str) -> tuple[str, List[str]]:
     run_id = str(uuid.uuid4())
     with _active_runs_lock:
-        replaced_sources = [sid for sid in _active_runs.keys() if sid != source_id]
-        _active_runs.clear()
+        replaced_sources: List[str] = []
+        # If the same source already has a run, replace only that run
+        if source_id in _active_runs:
+            pass  # will be overwritten below
+        elif len(_active_runs) >= MAX_CONCURRENT_RUNS:
+            # Evict the oldest (first key in dict) to make room
+            oldest_sid = next(iter(_active_runs))
+            replaced_sources.append(oldest_sid)
+            del _active_runs[oldest_sid]
         _active_runs[source_id] = run_id
         active_count = len(_active_runs)
     logger.info(
@@ -890,10 +898,6 @@ async def _start_upload_cleanup() -> None:
 @app.post("/api/upload/init")
 async def upload_init(payload: Dict[str, object]) -> JSONResponse:
     """Initialize a chunked upload session."""
-    stopped_sources = _stop_all_runs(reason="upload_init")
-    for sid in stopped_sources:
-        _clear_detect_cache(sid)
-        _clear_infer_cache(sid)
 
     filename = _safe_filename(str(payload.get("filename", "video.mp4")))
     total_size = int(payload.get("total_size", 0))
@@ -1065,10 +1069,6 @@ async def upload_complete(payload: Dict[str, str]) -> JSONResponse:
 # Legacy single-file upload (for small files / direct access)
 @app.post("/api/source/upload")
 async def upload_video(file: UploadFile = File(...)) -> JSONResponse:
-    stopped_sources = _stop_all_runs(reason="upload_single_file")
-    for sid in stopped_sources:
-        _clear_detect_cache(sid)
-        _clear_infer_cache(sid)
 
     filename = _safe_filename(file.filename or "video.mp4")
     source_id = str(uuid.uuid4())
@@ -1113,11 +1113,6 @@ async def upload_video(file: UploadFile = File(...)) -> JSONResponse:
 
 @app.post("/api/source/url")
 async def register_url(payload: Dict[str, str]) -> JSONResponse:
-    stopped_sources = _stop_all_runs(reason="register_url")
-    for sid in stopped_sources:
-        _clear_detect_cache(sid)
-        _clear_infer_cache(sid)
-
     url = (payload.get("url") or "").strip()
     if not url:
         raise HTTPException(status_code=400, detail="URL 不能为空")
@@ -1139,11 +1134,6 @@ async def register_url(payload: Dict[str, str]) -> JSONResponse:
 @app.post("/api/source/local")
 async def register_local(payload: Dict[str, str]) -> JSONResponse:
     """Load a video file that already exists on the server."""
-    stopped_sources = _stop_all_runs(reason="register_local")
-    for sid in stopped_sources:
-        _clear_detect_cache(sid)
-        _clear_infer_cache(sid)
-
     file_path = (payload.get("path") or "").strip()
     if not file_path:
         raise HTTPException(status_code=400, detail="路径不能为空")
@@ -1286,6 +1276,22 @@ async def control_stop_get(
     run_id: str = Query(""),
 ) -> JSONResponse:
     return await control_stop({"source_id": source_id, "run_id": run_id})
+
+
+@app.post("/api/control/stop-all")
+async def control_stop_all() -> JSONResponse:
+    stopped_sources = _stop_all_runs(reason="stop_all_api")
+    for sid in stopped_sources:
+        _clear_detect_cache(sid)
+        _clear_infer_cache(sid)
+    logger.info("全量停止 API 调用 stopped=%d", len(stopped_sources))
+    return JSONResponse(
+        {
+            "stopped_sources": stopped_sources,
+            "count": len(stopped_sources),
+            "message": "已停止所有分析会话",
+        }
+    )
 
 
 @app.get("/api/stream/{source_id}")

@@ -1,26 +1,35 @@
 /* ============================================================
-   Video Intelligence Studio — Frontend Logic
+   Video Intelligence Studio — Frontend Logic (Dual Panel)
    ============================================================ */
 
+const PANEL_COUNT = 2;
+
 const state = {
-  sourceId: null,
-  runId: null,
-  sourceKind: "",
-  playbackUrl: "",
   sourceType: "upload",
   mode: "infer",
   theme: "dark",
   defaultPrompt: "",
-  eventSource: null,
-  hls: null,
-  activeLogNode: null,
   actionToken: 0,
   activeAction: "",
   uploadAbortController: null,
-  mjpegStallTimer: null,
-  mjpegLastNaturalWidth: 0,
-  mjpegStallNotified: false,
+  panels: [],
 };
+
+// Initialize per-panel state
+for (let i = 0; i < PANEL_COUNT; i++) {
+  state.panels.push({
+    sourceId: null,
+    runId: null,
+    sourceKind: "",
+    playbackUrl: "",
+    eventSource: null,
+    hls: null,
+    activeLogNode: null,
+    mjpegStallTimer: null,
+    mjpegLastNaturalWidth: 0,
+    mjpegStallNotified: false,
+  });
+}
 
 const el = {
   sourceTypeSeg: document.getElementById("sourceTypeSeg"),
@@ -38,24 +47,33 @@ const el = {
   targetInput: document.getElementById("targetInput"),
   startBtn: document.getElementById("startBtn"),
   stopBtn: document.getElementById("stopBtn"),
-  streamPlayer: document.getElementById("streamPlayer"),
-  streamView: document.getElementById("streamView"),
-  streamPlaceholder: document.getElementById("streamPlaceholder"),
   statusChip: document.getElementById("statusChip"),
   statusText: document.getElementById("statusText"),
-  streamMeta: document.getElementById("streamMeta"),
   promptArea: document.getElementById("promptArea"),
   promptInput: document.getElementById("promptInput"),
   applyPromptBtn: document.getElementById("applyPromptBtn"),
   resetPromptBtn: document.getElementById("resetPromptBtn"),
-  logBox: document.getElementById("logBox"),
   insightTitle: document.getElementById("insightTitle"),
   modeTag: document.getElementById("modeTag"),
-  liveIndicator: document.getElementById("liveIndicator"),
   fileDrop: document.getElementById("fileDrop"),
   fileDropText: document.getElementById("fileDropText"),
   themeToggleBtn: document.getElementById("themeToggleBtn"),
+  panels: [],
 };
+
+// Initialize per-panel DOM elements
+for (let i = 0; i < PANEL_COUNT; i++) {
+  el.panels.push({
+    panel: document.getElementById(`videoPanel${i}`),
+    streamPlayer: document.getElementById(`streamPlayer${i}`),
+    streamView: document.getElementById(`streamView${i}`),
+    streamPlaceholder: document.getElementById(`streamPlaceholder${i}`),
+    streamMeta: document.getElementById(`streamMeta${i}`),
+    liveIndicator: document.getElementById(`liveIndicator${i}`),
+    logBox: document.getElementById(`logBox${i}`),
+    sourceName: document.getElementById(`sourceName${i}`),
+  });
+}
 
 /* ── Helpers ── */
 function setStatus(text, active = false) {
@@ -63,8 +81,14 @@ function setStatus(text, active = false) {
   el.statusChip.classList.toggle("active", active);
 }
 
-function setLive(active) {
-  el.liveIndicator.classList.toggle("active", active);
+function setLive(active, panelIdx) {
+  if (panelIdx === undefined) {
+    for (let i = 0; i < PANEL_COUNT; i++) {
+      el.panels[i].liveIndicator.classList.toggle("active", active);
+    }
+  } else {
+    el.panels[panelIdx].liveIndicator.classList.toggle("active", active);
+  }
 }
 
 async function fetchJson(url, options = {}) {
@@ -119,102 +143,96 @@ function isHlsUrl(url) {
   return url.toLowerCase().includes(".m3u8");
 }
 
-function stopMjpegStallDetection() {
-  if (state.mjpegStallTimer) {
-    clearInterval(state.mjpegStallTimer);
-    state.mjpegStallTimer = null;
+function stopMjpegStallDetection(panelIdx) {
+  const p = state.panels[panelIdx];
+  if (p.mjpegStallTimer) {
+    clearInterval(p.mjpegStallTimer);
+    p.mjpegStallTimer = null;
   }
-  state.mjpegLastNaturalWidth = 0;
-  state.mjpegStallNotified = false;
+  p.mjpegLastNaturalWidth = 0;
+  p.mjpegStallNotified = false;
 }
 
-function startMjpegStallDetection() {
-  stopMjpegStallDetection();
+function startMjpegStallDetection(panelIdx) {
+  stopMjpegStallDetection(panelIdx);
+  const p = state.panels[panelIdx];
+  const pe = el.panels[panelIdx];
   let unchangedTicks = 0;
-  // Poll the MJPEG img element: if its rendered size stays identical for
-  // several seconds it likely means the backend stream stopped delivering.
-  state.mjpegStallTimer = setInterval(() => {
-    if (!state.runId || !el.streamView || el.streamView.style.display === "none") {
+  p.mjpegStallTimer = setInterval(() => {
+    if (!p.runId || !pe.streamView || pe.streamView.style.display === "none") {
       return;
     }
-    // Use naturalWidth change as a proxy — when the MJPEG stream is
-    // alive the browser keeps decoding new JPEG frames.  We additionally
-    // compare the raw element width which some browsers update per-frame.
-    const w = el.streamView.naturalWidth || el.streamView.width || 0;
-    if (w > 0 && w === state.mjpegLastNaturalWidth) {
+    const w = pe.streamView.naturalWidth || pe.streamView.width || 0;
+    if (w > 0 && w === p.mjpegLastNaturalWidth) {
       unchangedTicks++;
     } else {
       unchangedTicks = 0;
     }
-    state.mjpegLastNaturalWidth = w;
-    // ~8 seconds with no apparent frame change
-    if (unchangedTicks >= 8 && !state.mjpegStallNotified) {
-      state.mjpegStallNotified = true;
-      addLog("⚠ 视频流可能已中断（画面长时间未更新），建议重新点击「开始分析」", true);
+    p.mjpegLastNaturalWidth = w;
+    if (unchangedTicks >= 8 && !p.mjpegStallNotified) {
+      p.mjpegStallNotified = true;
+      addLog("⚠ 视频流可能已中断（画面长时间未更新），建议重新点击「开始分析」", panelIdx, true);
       setStatus("视频流可能已中断", false);
     }
   }, 1000);
 }
 
-function stopNativePlayback() {
-  if (state.hls) {
+function stopNativePlayback(panelIdx) {
+  const p = state.panels[panelIdx];
+  const pe = el.panels[panelIdx];
+  if (p.hls) {
     try {
-      state.hls.destroy();
+      p.hls.destroy();
     } catch {
       // ignore
     }
-    state.hls = null;
+    p.hls = null;
   }
-  if (el.streamPlayer) {
+  if (pe.streamPlayer) {
     try {
-      el.streamPlayer.pause();
+      pe.streamPlayer.pause();
     } catch {
       // ignore
     }
-    el.streamPlayer.removeAttribute("src");
-    el.streamPlayer.load();
-    el.streamPlayer.style.display = "none";
+    pe.streamPlayer.removeAttribute("src");
+    pe.streamPlayer.load();
+    pe.streamPlayer.style.display = "none";
   }
 }
 
-async function tryStartDirectPlayback() {
-  if (!el.streamPlayer) return false;
+async function tryStartDirectPlayback(panelIdx) {
+  const p = state.panels[panelIdx];
+  const pe = el.panels[panelIdx];
+  if (!pe.streamPlayer) return false;
 
-  const sourceKind = state.sourceKind || "";
-  const playbackUrl = state.playbackUrl || "";
+  const sourceKind = p.sourceKind || "";
+  const playbackUrl = p.playbackUrl || "";
   if (!playbackUrl) return false;
 
-  stopNativePlayback();
-  const player = el.streamPlayer;
+  stopNativePlayback(panelIdx);
+  const player = pe.streamPlayer;
 
-  // For uploaded files, try native playback first
   if (sourceKind === "file") {
-    // Only use native playback in infer mode
-    // In detect mode, we need MJPEG stream to show detection boxes
     if (state.mode !== "infer") {
       return false;
     }
-    
+
     player.src = playbackUrl;
     player.style.display = "block";
-    
-    // Add error handler to fallback to MJPEG if native playback fails
+
     const errorHandler = () => {
-      console.warn("Native video playback failed, will use MJPEG stream");
+      console.warn(`Panel ${panelIdx}: Native video playback failed, will use MJPEG stream`);
       player.style.display = "none";
       player.removeEventListener("error", errorHandler);
     };
     player.addEventListener("error", errorHandler);
-    
+
     try {
       await player.play();
-      // Remove error handler if play succeeds
       player.removeEventListener("error", errorHandler);
       return true;
     } catch (e) {
-      console.warn("Native video play() failed:", e);
-      // Don't return false immediately - the video might still load
-      // Check if video has valid duration after a short delay
+      console.warn(`Panel ${panelIdx}: Native video play() failed:`, e);
       await new Promise(r => setTimeout(r, 500));
       if (player.readyState >= 2) {
         return true;
@@ -224,8 +242,6 @@ async function tryStartDirectPlayback() {
     }
   }
 
-  // For HLS streams, ALWAYS use native playback (both infer and detect modes)
-  // This avoids the slow OpenCV -> MJPEG conversion for H265 streams
   if (sourceKind === "url" && isHlsUrl(playbackUrl)) {
     if (player.canPlayType("application/vnd.apple.mpegurl")) {
       player.src = playbackUrl;
@@ -255,13 +271,12 @@ async function tryStartDirectPlayback() {
       hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
         player.play().catch(() => {});
       });
-      // Auto-sync to live edge on buffer stall
       hls.on(window.Hls.Events.ERROR, (event, data) => {
         if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
           hls.recoverMediaError();
         }
       });
-      state.hls = hls;
+      p.hls = hls;
       player.style.display = "block";
       return true;
     }
@@ -287,14 +302,17 @@ function toggleTheme() {
   applyTheme(state.theme === "dark" ? "light" : "dark");
 }
 
-function clearLogs() {
-  el.logBox.innerHTML = "";
-  state.activeLogNode = null;
+function clearLogs(panelIdx) {
+  el.panels[panelIdx].logBox.innerHTML = "";
+  state.panels[panelIdx].activeLogNode = null;
 }
 
-function addLog(message, markLatest = false) {
-  if (markLatest && state.activeLogNode) {
-    state.activeLogNode.classList.remove("latest");
+function addLog(message, panelIdx, markLatest = false) {
+  const p = state.panels[panelIdx];
+  const logBox = el.panels[panelIdx].logBox;
+
+  if (markLatest && p.activeLogNode) {
+    p.activeLogNode.classList.remove("latest");
   }
 
   const item = document.createElement("div");
@@ -309,20 +327,22 @@ function addLog(message, markLatest = false) {
 
   item.appendChild(ts);
   item.appendChild(content);
-  el.logBox.appendChild(item);
-  el.logBox.scrollTop = el.logBox.scrollHeight;
+  logBox.appendChild(item);
+  logBox.scrollTop = logBox.scrollHeight;
 
-  if (markLatest) state.activeLogNode = item;
+  if (markLatest) p.activeLogNode = item;
 }
 
-function appendToLatest(text) {
-  if (!state.activeLogNode) {
-    addLog(text, true);
+function appendToLatest(text, panelIdx) {
+  const p = state.panels[panelIdx];
+  const logBox = el.panels[panelIdx].logBox;
+  if (!p.activeLogNode) {
+    addLog(text, panelIdx, true);
     return;
   }
-  const content = state.activeLogNode.lastElementChild;
+  const content = p.activeLogNode.lastElementChild;
   content.textContent += text;
-  el.logBox.scrollTop = el.logBox.scrollHeight;
+  logBox.scrollTop = logBox.scrollHeight;
 }
 
 function claimAction(actionName = "") {
@@ -352,23 +372,67 @@ function isAbortLikeError(err) {
   );
 }
 
+function _is_run_active_local(panelIdx) {
+  if (panelIdx === undefined) {
+    return state.panels.some(p => !!(p.sourceId && p.runId));
+  }
+  const p = state.panels[panelIdx];
+  return !!(p.sourceId && p.runId);
+}
+
+function getNextAvailablePanel() {
+  if (!state.panels[0].sourceId) return 0;
+  if (!state.panels[1].sourceId) return 1;
+  return 0; // replace oldest
+}
+
+function updateButtonStates() {
+  const anySource = state.panels.some(p => p.sourceId);
+  const anyRunning = state.panels.some(p => p.runId);
+  el.startBtn.disabled = anyRunning || !anySource;
+  el.stopBtn.disabled = !anyRunning;
+}
+
+function bestEffortStopRun(sourceId, runId) {
+  if (!sourceId || !runId) return;
+  fetchJson("/api/control/stop", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ source_id: sourceId, run_id: runId }),
+  }).catch(() => {});
+}
+
+function resetPanelViewState(panelIdx) {
+  const p = state.panels[panelIdx];
+  const pe = el.panels[panelIdx];
+
+  p.sourceId = null;
+  p.runId = null;
+  p.sourceKind = "";
+  p.playbackUrl = "";
+
+  stopNativePlayback(panelIdx);
+  pe.streamView.removeAttribute("src");
+  pe.streamView.style.display = "none";
+  pe.streamPlaceholder.style.display = "flex";
+  pe.streamMeta.textContent = "等待输入视频源";
+  pe.sourceName.textContent = "";
+  clearLogs(panelIdx);
+  setLive(false, panelIdx);
+}
+
 function resetToInitialViewState() {
-  state.sourceId = null;
-  state.runId = null;
-  state.sourceKind = "";
-  state.playbackUrl = "";
   state.mode = "infer";
   state.sourceType = "upload";
 
-  stopNativePlayback();
-  el.streamView.removeAttribute("src");
-  el.streamView.style.display = "none";
-  el.streamPlaceholder.style.display = "flex";
+  for (let i = 0; i < PANEL_COUNT; i++) {
+    resetPanelViewState(i);
+    addLog("欢迎使用 Video Intelligence Studio。请先接入视频源，然后点击「开始分析」。", i);
+  }
 
   updateSourceTypeUI();
   updateModeUI();
 
-  el.streamMeta.textContent = "等待输入视频源";
   el.promptInput.value = state.defaultPrompt;
   el.targetInput.value = "";
   el.streamUrl.value = "";
@@ -376,10 +440,7 @@ function resetToInitialViewState() {
   if (el.videoFile) el.videoFile.value = "";
   if (el.fileDropText) el.fileDropText.textContent = "点击或拖拽视频文件";
 
-  clearLogs();
-  addLog("欢迎使用 Video Intelligence Studio。请先接入视频源，然后点击「开始分析」。");
   setStatus("等待连接", false);
-  setLive(false);
   el.startBtn.disabled = true;
   el.stopBtn.disabled = true;
 }
@@ -405,7 +466,42 @@ function updateModeUI() {
   el.modeTag.textContent = inferMode ? "Qwen2.5-VL-3B" : "YOLOv8";
 }
 
-/* ── Core Actions ── */
+/* ── Core Actions: Per-Panel ── */
+async function stopAnalysisForPanel(panelIdx, notifyBackend = true, waitBackendStop = false) {
+  const p = state.panels[panelIdx];
+  const pe = el.panels[panelIdx];
+  const sourceId = p.sourceId;
+  const runId = p.runId;
+
+  if (p.eventSource) {
+    p.eventSource.close();
+    p.eventSource = null;
+  }
+  stopMjpegStallDetection(panelIdx);
+
+  p.runId = null;
+  stopNativePlayback(panelIdx);
+  pe.streamView.removeAttribute("src");
+  pe.streamView.style.display = "none";
+  pe.streamPlaceholder.style.display = "flex";
+  pe.streamMeta.textContent = p.sourceId ? "分析已暂停" : "等待输入视频源";
+  setLive(false, panelIdx);
+
+  if (notifyBackend && sourceId && runId) {
+    const stopPromise = fetchJsonWithTimeout("/api/control/stop", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source_id: sourceId, run_id: runId }),
+    }, 7000).catch((e) => {
+      console.warn(`Panel ${panelIdx}: stop control failed:`, e);
+      return null;
+    });
+    if (waitBackendStop) {
+      await stopPromise;
+    }
+  }
+}
+
 async function stopAnalysis(
   notifyBackend = true,
   resetToInitial = false,
@@ -415,61 +511,35 @@ async function stopAnalysis(
   if (invalidateAction) {
     claimAction("stop");
   }
-  const sourceId = state.sourceId;
-  const runId = state.runId;
-
-  if (state.eventSource) {
-    state.eventSource.close();
-    state.eventSource = null;
-  }
-  stopMjpegStallDetection();
 
   if (resetToInitial) {
+    // Stop all panels first, then reset
+    for (let i = 0; i < PANEL_COUNT; i++) {
+      await stopAnalysisForPanel(i, notifyBackend, waitBackendStop);
+    }
     resetToInitialViewState();
   } else {
-    state.runId = null;
-    stopNativePlayback();
-    el.streamView.removeAttribute("src");
-    el.streamView.style.display = "none";
-    el.streamPlaceholder.style.display = "flex";
-    el.stopBtn.disabled = true;
-    el.startBtn.disabled = !state.sourceId;
-    el.streamMeta.textContent = "分析已暂停";
-    setStatus("已停止", false);
-    setLive(false);
-  }
-
-  if (notifyBackend && sourceId && runId) {
-    const stopPromise = fetchJsonWithTimeout("/api/control/stop", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ source_id: sourceId, run_id: runId }),
-    }, 7000).catch((e) => {
-      console.warn("stop control failed:", e);
-      return null;
-    });
-    if (waitBackendStop) {
-      await stopPromise;
+    for (let i = 0; i < PANEL_COUNT; i++) {
+      await stopAnalysisForPanel(i, notifyBackend, waitBackendStop);
     }
+    setStatus("已停止", false);
+    updateButtonStates();
   }
 }
 
-async function startVideoStream() {
-  const actionToken = claimAction("start");
-  const sourceId = state.sourceId;
-  const mode = state.mode;
+async function startPanelStream(panelIdx, actionToken, mode) {
+  const p = state.panels[panelIdx];
+  const pe = el.panels[panelIdx];
 
-  if (!sourceId) {
-    addLog("⚠ 请先上传视频或输入流 URL");
-    releaseAction(actionToken);
-    return;
-  }
+  if (!p.sourceId) return;
 
-  if (state.runId || state.eventSource) {
-    await stopAnalysis(true, false, false, true);
+  // Stop existing run for this panel if any
+  if (p.runId || p.eventSource) {
+    await stopAnalysisForPanel(panelIdx, true, true);
   }
   if (!isActionActive(actionToken)) return;
 
+  const sourceId = p.sourceId;
   const startData = await fetchJsonWithTimeout(
     "/api/control/start",
     {
@@ -480,39 +550,39 @@ async function startVideoStream() {
     10000
   );
   if (!startData.run_id) {
-    throw new Error("后端未返回 run_id，请检查服务端日志");
+    throw new Error(`面板 ${panelIdx + 1}: 后端未返回 run_id，请检查服务端日志`);
   }
   const runId = startData.run_id;
 
-  if (!isActionActive(actionToken) || sourceId !== state.sourceId || mode !== state.mode) {
+  if (!isActionActive(actionToken) || sourceId !== p.sourceId || mode !== state.mode) {
     bestEffortStopRun(sourceId, runId);
     return;
   }
-  state.runId = runId;
+  p.runId = runId;
 
-  clearLogs();
+  clearLogs(panelIdx);
 
   const targets = encodeURIComponent(el.targetInput.value.trim());
   const streamUrl = `/api/stream/${sourceId}?run_id=${encodeURIComponent(runId)}&mode=${mode}&targets=${targets}&t=${Date.now()}`;
-  const useDirectPlayback = await tryStartDirectPlayback();
-  if (!isActionActive(actionToken) || sourceId !== state.sourceId || runId !== state.runId) {
+  const useDirectPlayback = await tryStartDirectPlayback(panelIdx);
+  if (!isActionActive(actionToken) || sourceId !== p.sourceId || runId !== p.runId) {
     bestEffortStopRun(sourceId, runId);
-    stopNativePlayback();
-    el.streamView.removeAttribute("src");
+    stopNativePlayback(panelIdx);
+    pe.streamView.removeAttribute("src");
     return;
   }
   if (useDirectPlayback) {
-    el.streamView.removeAttribute("src");
-    el.streamView.style.display = "none";
-    el.streamPlaceholder.style.display = "none";
+    pe.streamView.removeAttribute("src");
+    pe.streamView.style.display = "none";
+    pe.streamPlaceholder.style.display = "none";
   } else {
-    stopNativePlayback();
-    el.streamView.src = streamUrl;
-    el.streamView.style.display = "block";
-    el.streamPlaceholder.style.display = "none";
-    startMjpegStallDetection();
+    stopNativePlayback(panelIdx);
+    pe.streamView.src = streamUrl;
+    pe.streamView.style.display = "block";
+    pe.streamPlaceholder.style.display = "none";
+    startMjpegStallDetection(panelIdx);
   }
-  el.streamMeta.textContent = mode === "infer"
+  pe.streamMeta.textContent = mode === "infer"
     ? "Qwen2.5-VL-3B 正在流式推理"
     : "YOLOv8 正在实时检测";
 
@@ -527,41 +597,40 @@ async function startVideoStream() {
       try {
         const payload = JSON.parse(evt.data);
         if (payload.type === "start") {
-          addLog("", true);
+          addLog("", panelIdx, true);
         } else if (payload.type === "chunk") {
-          appendToLatest(payload.text);
+          appendToLatest(payload.text, panelIdx);
         } else if (payload.type === "error") {
-          addLog("❌ " + payload.text, true);
+          addLog("❌ " + payload.text, panelIdx, true);
         }
       } catch (e) {
-        console.error("SSE parse error:", e);
+        console.error(`Panel ${panelIdx}: SSE parse error:`, e);
       }
     }
-    state.eventSource = makeInferSSE();
-    state.eventSource.onmessage = onInferMessage;
+    p.eventSource = makeInferSSE();
+    p.eventSource.onmessage = onInferMessage;
     const MAX_SSE_RECONNECTS = 3;
     let inferReconnects = 0;
     function attachInferErrorHandler() {
-      state.eventSource.onerror = () => {
-        if (inferReconnects < MAX_SSE_RECONNECTS && _is_run_active_local()) {
+      p.eventSource.onerror = () => {
+        if (inferReconnects < MAX_SSE_RECONNECTS && _is_run_active_local(panelIdx)) {
           inferReconnects++;
           const backoff = 1500 * inferReconnects;
-          addLog(`⚠ 推理流短暂中断，正在重连(${inferReconnects}/${MAX_SSE_RECONNECTS})...`, true);
-          if (state.eventSource) state.eventSource.close();
+          addLog(`⚠ 推理流短暂中断，正在重连(${inferReconnects}/${MAX_SSE_RECONNECTS})...`, panelIdx, true);
+          if (p.eventSource) p.eventSource.close();
           setTimeout(() => {
-            if (!_is_run_active_local()) return;
-            state.eventSource = makeInferSSE();
-            state.eventSource.onmessage = onInferMessage;
+            if (!_is_run_active_local(panelIdx)) return;
+            p.eventSource = makeInferSSE();
+            p.eventSource.onmessage = onInferMessage;
             attachInferErrorHandler();
           }, backoff);
           return;
         }
-        addLog("⚠ 推理流连接中断，请重新点击「开始分析」", true);
+        addLog("⚠ 推理流连接中断，请重新点击「开始分析」", panelIdx, true);
         setStatus("推理流中断", false);
-        setLive(false);
-        state.runId = null;
-        el.startBtn.disabled = !state.sourceId;
-        el.stopBtn.disabled = true;
+        setLive(false, panelIdx);
+        p.runId = null;
+        updateButtonStates();
       };
     }
     attachInferErrorHandler();
@@ -575,66 +644,87 @@ async function startVideoStream() {
       try {
         const payload = JSON.parse(evt.data);
         if (payload.type === "detect") {
-          addLog(payload.text, true);
+          addLog(payload.text, panelIdx, true);
         }
       } catch (e) {
-        console.error("SSE parse error:", e);
+        console.error(`Panel ${panelIdx}: SSE parse error:`, e);
       }
     }
-    state.eventSource = makeDetectSSE();
-    state.eventSource.onmessage = onDetectMessage;
+    p.eventSource = makeDetectSSE();
+    p.eventSource.onmessage = onDetectMessage;
     const MAX_DETECT_RECONNECTS = 3;
     let detectReconnects = 0;
     function attachDetectErrorHandler() {
-      state.eventSource.onerror = () => {
-        if (detectReconnects < MAX_DETECT_RECONNECTS && _is_run_active_local()) {
+      p.eventSource.onerror = () => {
+        if (detectReconnects < MAX_DETECT_RECONNECTS && _is_run_active_local(panelIdx)) {
           detectReconnects++;
           const backoff = 1500 * detectReconnects;
-          addLog(`⚠ 检测流短暂中断，正在重连(${detectReconnects}/${MAX_DETECT_RECONNECTS})...`, true);
-          if (state.eventSource) state.eventSource.close();
+          addLog(`⚠ 检测流短暂中断，正在重连(${detectReconnects}/${MAX_DETECT_RECONNECTS})...`, panelIdx, true);
+          if (p.eventSource) p.eventSource.close();
           setTimeout(() => {
-            if (!_is_run_active_local()) return;
-            state.eventSource = makeDetectSSE();
-            state.eventSource.onmessage = onDetectMessage;
+            if (!_is_run_active_local(panelIdx)) return;
+            p.eventSource = makeDetectSSE();
+            p.eventSource.onmessage = onDetectMessage;
             attachDetectErrorHandler();
           }, backoff);
           return;
         }
-        addLog("⚠ 检测流连接中断，请重新点击「开始分析」", true);
+        addLog("⚠ 检测流连接中断，请重新点击「开始分析」", panelIdx, true);
         setStatus("检测流中断", false);
-        setLive(false);
-        state.runId = null;
-        el.startBtn.disabled = !state.sourceId;
-        el.stopBtn.disabled = true;
+        setLive(false, panelIdx);
+        p.runId = null;
+        updateButtonStates();
       };
     }
     attachDetectErrorHandler();
   }
 
-  if (!isActionActive(actionToken)) {
-    bestEffortStopRun(sourceId, runId);
+  setLive(true, panelIdx);
+}
+
+async function startAllStreams() {
+  const actionToken = claimAction("start");
+  const mode = state.mode;
+  const activePanels = [];
+
+  for (let i = 0; i < PANEL_COUNT; i++) {
+    if (state.panels[i].sourceId) {
+      activePanels.push(i);
+    }
+  }
+
+  if (activePanels.length === 0) {
+    addLog("⚠ 请先上传视频或输入流 URL", 0);
+    releaseAction(actionToken);
     return;
   }
-  el.startBtn.disabled = true;
-  el.stopBtn.disabled = false;
-  setStatus("分析中", true);
-  setLive(true);
+
+  // Stop any currently running panels first
+  for (let i = 0; i < PANEL_COUNT; i++) {
+    if (state.panels[i].runId || state.panels[i].eventSource) {
+      await stopAnalysisForPanel(i, true, true);
+    }
+  }
+  if (!isActionActive(actionToken)) return;
+
+  for (const panelIdx of activePanels) {
+    if (!isActionActive(actionToken)) return;
+    try {
+      await startPanelStream(panelIdx, actionToken, mode);
+    } catch (err) {
+      addLog(`❌ 面板 ${panelIdx + 1} 启动失败: ${err.message}`, panelIdx, true);
+    }
+  }
+
+  if (!isActionActive(actionToken)) return;
+  updateButtonStates();
+  if (state.panels.some(p => p.runId)) {
+    setStatus("分析中", true);
+  }
   releaseAction(actionToken);
 }
 
-function _is_run_active_local() {
-  return !!(state.sourceId && state.runId);
-}
-
-function bestEffortStopRun(sourceId, runId) {
-  if (!sourceId || !runId) return;
-  fetchJson("/api/control/stop", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ source_id: sourceId, run_id: runId }),
-  }).catch(() => {});
-}
-
+/* ── Upload / Register / Load ── */
 async function uploadChunkWithRetry(url, formData, maxRetries = 3, signal = null) {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     let timer = null;
@@ -665,7 +755,6 @@ async function uploadChunkWithRetry(url, formData, maxRetries = 3, signal = null
         throw new Error("上传超时：网络可能不稳定，请重新上传");
       }
       if (attempt === maxRetries) throw err;
-      // Wait before retry: 1s, 2s, 3s...
       await new Promise(r => setTimeout(r, attempt * 1000));
     }
   }
@@ -673,28 +762,34 @@ async function uploadChunkWithRetry(url, formData, maxRetries = 3, signal = null
 
 async function uploadVideo() {
   const actionToken = claimAction("upload");
-  if (state.runId || state.eventSource) {
-    await stopAnalysis(true, false, false, true);
+  // Get target panel
+  const panelIdx = getNextAvailablePanel();
+  const p = state.panels[panelIdx];
+  const pe = el.panels[panelIdx];
+
+  // Stop existing run for this panel if active
+  if (p.runId || p.eventSource) {
+    await stopAnalysisForPanel(panelIdx, true, true);
   }
   if (!isActionActive(actionToken)) return;
 
   const file = el.videoFile.files?.[0];
   if (!file) {
-    addLog("⚠ 请先选择视频文件");
+    addLog("⚠ 请先选择视频文件", panelIdx);
     releaseAction(actionToken);
     return;
   }
 
   el.uploadBtn.disabled = true;
   const originalText = el.uploadBtn.textContent;
-  const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB per chunk
+  const CHUNK_SIZE = 2 * 1024 * 1024;
   let watchdog = null;
   let abortController = null;
 
   try {
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
     const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
-    addLog(`⏳ 开始分片上传: ${file.name} (${sizeMB}MB, ${totalChunks} 片)`);
+    addLog(`⏳ 开始分片上传: ${file.name} (${sizeMB}MB, ${totalChunks} 片)`, panelIdx);
     const uploadStartTs = Date.now();
     let lastProgressTs = Date.now();
     const fileMB = file.size / (1024 * 1024);
@@ -753,7 +848,6 @@ async function uploadVideo() {
 
     // Step 2: Upload chunks with progress
     let uploadedChunks = 0;
-    // Upload chunks with limited concurrency (2 at a time)
     const CONCURRENCY = 2;
     let nextChunk = 0;
     const errors = [];
@@ -830,14 +924,14 @@ async function uploadVideo() {
     }
     if (!isActionActive(actionToken)) return;
 
-    state.sourceId = data.source_id;
-    state.sourceKind = data.kind || "file";
-    state.playbackUrl = data.playback_url || "";
-    el.startBtn.disabled = false;
-    el.streamMeta.textContent = `来源: ${data.name} (${data.size_mb || "?"}MB)`;
+    p.sourceId = data.source_id;
+    p.sourceKind = data.kind || "file";
+    p.playbackUrl = data.playback_url || "";
+    pe.streamMeta.textContent = `来源: ${data.name} (${data.size_mb || "?"}MB)`;
+    pe.sourceName.textContent = `— ${data.name}`;
     setStatus("视频已就绪", true);
-    addLog(`✓ 已加载: ${data.name} (${data.size_mb}MB)`);
-    // 视觉反馈：短暂高亮开始按钮
+    addLog(`✓ 已加载: ${data.name} (${data.size_mb}MB)`, panelIdx);
+    updateButtonStates();
     el.startBtn.classList.add("pulse-ready");
     setTimeout(() => el.startBtn.classList.remove("pulse-ready"), 2000);
   } finally {
@@ -857,14 +951,18 @@ async function uploadVideo() {
 
 async function registerUrl() {
   const actionToken = claimAction("connect_url");
-  if (state.runId || state.eventSource) {
-    await stopAnalysis(true, false, false, true);
+  const panelIdx = getNextAvailablePanel();
+  const p = state.panels[panelIdx];
+  const pe = el.panels[panelIdx];
+
+  if (p.runId || p.eventSource) {
+    await stopAnalysisForPanel(panelIdx, true, true);
   }
   if (!isActionActive(actionToken)) return;
 
   const url = el.streamUrl.value.trim();
   if (!url) {
-    addLog("⚠ 请输入流媒体 URL");
+    addLog("⚠ 请输入流媒体 URL", panelIdx);
     releaseAction(actionToken);
     return;
   }
@@ -880,13 +978,14 @@ async function registerUrl() {
     });
     if (!isActionActive(actionToken)) return;
 
-    state.sourceId = data.source_id;
-    state.sourceKind = data.kind || "url";
-    state.playbackUrl = data.playback_url || url;
-    el.startBtn.disabled = false;
-    el.streamMeta.textContent = `来源: ${url}`;
+    p.sourceId = data.source_id;
+    p.sourceKind = data.kind || "url";
+    p.playbackUrl = data.playback_url || url;
+    pe.streamMeta.textContent = `来源: ${url}`;
+    pe.sourceName.textContent = `— ${url.length > 30 ? url.slice(0, 30) + "..." : url}`;
     setStatus("流地址已就绪", true);
-    addLog(`✓ 已接入: ${url}`);
+    addLog(`✓ 已接入: ${url}`, panelIdx);
+    updateButtonStates();
     el.startBtn.classList.add("pulse-ready");
     setTimeout(() => el.startBtn.classList.remove("pulse-ready"), 2000);
   } finally {
@@ -897,14 +996,18 @@ async function registerUrl() {
 
 async function loadLocalFile() {
   const actionToken = claimAction("load_local");
-  if (state.runId || state.eventSource) {
-    await stopAnalysis(true, false, false, true);
+  const panelIdx = getNextAvailablePanel();
+  const p = state.panels[panelIdx];
+  const pe = el.panels[panelIdx];
+
+  if (p.runId || p.eventSource) {
+    await stopAnalysisForPanel(panelIdx, true, true);
   }
   if (!isActionActive(actionToken)) return;
 
   const localPath = el.localPath.value.trim();
   if (!localPath) {
-    addLog("⚠ 请输入服务器上的文件路径");
+    addLog("⚠ 请输入服务器上的文件路径", panelIdx);
     releaseAction(actionToken);
     return;
   }
@@ -920,13 +1023,14 @@ async function loadLocalFile() {
     });
     if (!isActionActive(actionToken)) return;
 
-    state.sourceId = data.source_id;
-    state.sourceKind = data.kind || "file";
-    state.playbackUrl = data.playback_url || "";
-    el.startBtn.disabled = false;
-    el.streamMeta.textContent = `来源: ${data.name} (${data.size_mb || "?"}MB)`;
+    p.sourceId = data.source_id;
+    p.sourceKind = data.kind || "file";
+    p.playbackUrl = data.playback_url || "";
+    pe.streamMeta.textContent = `来源: ${data.name} (${data.size_mb || "?"}MB)`;
+    pe.sourceName.textContent = `— ${data.name}`;
     setStatus("视频已就绪", true);
-    addLog(`✓ 已加载服务器文件: ${data.name}`);
+    addLog(`✓ 已加载服务器文件: ${data.name}`, panelIdx);
+    updateButtonStates();
     el.startBtn.classList.add("pulse-ready");
     setTimeout(() => el.startBtn.classList.remove("pulse-ready"), 2000);
   } finally {
@@ -957,14 +1061,16 @@ async function boot() {
   el.startBtn.disabled = true;
   el.stopBtn.disabled = true;
 
-  addLog("欢迎使用 Video Intelligence Studio。请先接入视频源，然后点击「开始分析」。");
+  for (let i = 0; i < PANEL_COUNT; i++) {
+    addLog("欢迎使用 Video Intelligence Studio。请先接入视频源，然后点击「开始分析」。", i);
+  }
 }
 
 /* ── Event Listeners ── */
 el.sourceTypeSeg.addEventListener("click", async (e) => {
   const btn = e.target.closest("button[data-source-type]");
   if (!btn) return;
-  if (state.runId || state.eventSource) {
+  if (state.panels.some(p => p.runId)) {
     await stopAnalysis(true, false, true, true);
   }
   state.sourceType = btn.dataset.sourceType;
@@ -975,28 +1081,30 @@ el.modeSeg.addEventListener("click", async (e) => {
   const btn = e.target.closest("button[data-mode]");
   if (!btn) return;
 
-  if (state.runId || state.eventSource) {
+  if (state.panels.some(p => p.runId)) {
     await stopAnalysis(true, false, true, true);
   }
   state.mode = btn.dataset.mode;
   updateModeUI();
-  clearLogs();
-  if (state.sourceId) el.startBtn.disabled = false;
+  for (let i = 0; i < PANEL_COUNT; i++) {
+    clearLogs(i);
+  }
+  updateButtonStates();
 });
 
 el.uploadBtn.addEventListener("click", async () => {
   try { await uploadVideo(); }
-  catch (err) { addLog(`❌ 上传失败: ${err.message}`, true); setStatus("上传失败", false); }
+  catch (err) { addLog(`❌ 上传失败: ${err.message}`, 0, true); setStatus("上传失败", false); }
 });
 
 el.urlBtn.addEventListener("click", async () => {
   try { await registerUrl(); }
-  catch (err) { addLog(`❌ 连接失败: ${err.message}`, true); setStatus("连接失败", false); }
+  catch (err) { addLog(`❌ 连接失败: ${err.message}`, 0, true); setStatus("连接失败", false); }
 });
 
 el.localBtn.addEventListener("click", async () => {
   try { await loadLocalFile(); }
-  catch (err) { addLog(`❌ 加载失败: ${err.message}`, true); setStatus("加载失败", false); }
+  catch (err) { addLog(`❌ 加载失败: ${err.message}`, 0, true); setStatus("加载失败", false); }
 });
 
 el.startBtn.addEventListener("click", async () => {
@@ -1004,31 +1112,46 @@ el.startBtn.addEventListener("click", async () => {
   el.startBtn.textContent = "启动中...";
   el.startBtn.disabled = true;
   try {
-    await startVideoStream();
+    await startAllStreams();
   } catch (err) {
-    addLog(`❌ 启动失败: ${err.message}`, true);
+    addLog(`❌ 启动失败: ${err.message}`, 0, true);
     setStatus("启动失败", false);
   } finally {
     el.startBtn.textContent = origText;
-    el.startBtn.disabled = !!state.runId || !state.sourceId;
+    updateButtonStates();
   }
 });
 
 el.stopBtn.addEventListener("click", async () => {
   await stopAnalysis(true, false);
-  addLog("■ 分析已停止，可重新点击「开始分析」继续");
+  for (let i = 0; i < PANEL_COUNT; i++) {
+    if (state.panels[i].sourceId) {
+      addLog("■ 分析已停止，可重新点击「开始分析」继续", i);
+    }
+  }
 });
 
 el.applyPromptBtn.addEventListener("click", async () => {
   if (state.mode !== "infer") return;
-  if (!state.sourceId) { addLog("⚠ 请先接入视频源", true); return; }
-  addLog("→ 已应用新 Prompt，重新开始流式推理...", true);
-  await startVideoStream();
+  if (!state.panels.some(p => p.sourceId)) {
+    addLog("⚠ 请先接入视频源", 0, true);
+    return;
+  }
+  for (let i = 0; i < PANEL_COUNT; i++) {
+    if (state.panels[i].sourceId) {
+      addLog("→ 已应用新 Prompt，重新开始流式推理...", i, true);
+    }
+  }
+  await startAllStreams();
 });
 
 el.resetPromptBtn.addEventListener("click", () => {
   el.promptInput.value = state.defaultPrompt;
-  addLog("→ Prompt 已恢复默认", true);
+  for (let i = 0; i < PANEL_COUNT; i++) {
+    if (state.panels[i].sourceId) {
+      addLog("→ Prompt 已恢复默认", i, true);
+    }
+  }
 });
 
 if (el.themeToggleBtn) {
@@ -1060,24 +1183,27 @@ el.videoFile.addEventListener("change", () => {
 });
 
 window.addEventListener("beforeunload", () => {
-  if (state.eventSource) state.eventSource.close();
-  stopNativePlayback();
-  if (state.sourceId && state.runId) {
-    try {
-      navigator.sendBeacon(
-        "/api/control/stop",
-        new Blob(
-          [JSON.stringify({ source_id: state.sourceId, run_id: state.runId })],
-          { type: "application/json" }
-        )
-      );
-    } catch {
-      // ignore
+  for (let i = 0; i < PANEL_COUNT; i++) {
+    const p = state.panels[i];
+    if (p.eventSource) p.eventSource.close();
+    stopNativePlayback(i);
+    if (p.sourceId && p.runId) {
+      try {
+        navigator.sendBeacon(
+          "/api/control/stop",
+          new Blob(
+            [JSON.stringify({ source_id: p.sourceId, run_id: p.runId })],
+            { type: "application/json" }
+          )
+        );
+      } catch {
+        // ignore
+      }
     }
   }
 });
 
 boot().catch((err) => {
-  addLog(`❌ 初始化失败: ${err.message}`, true);
+  addLog(`❌ 初始化失败: ${err.message}`, 0, true);
   setStatus("初始化失败", false);
 });

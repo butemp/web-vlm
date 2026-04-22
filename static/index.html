@@ -95,24 +95,50 @@
         </div>
       </aside>
 
-      <!-- Center: Video -->
-      <section class="panel panel-video">
-        <div class="video-header">
-          <div>
-            <h2>实时画面</h2>
-            <p class="video-meta" id="streamMeta">等待输入视频源</p>
+      <!-- Center: Video Panels -->
+      <section class="panel panel-video-wrapper">
+        <div class="video-panels-container">
+          <div class="video-panel" id="videoPanel0">
+            <div class="video-header">
+              <div>
+                <h2>面板 1 <span class="source-name" id="sourceName0"></span></h2>
+                <p class="video-meta" id="streamMeta0">等待输入视频源</p>
+              </div>
+              <div class="live-indicator" id="liveIndicator0">
+                <span class="live-dot"></span>
+                LIVE
+              </div>
+            </div>
+            <div class="video-container">
+              <video id="streamPlayer0" autoplay muted playsinline controls></video>
+              <img id="streamView0" alt="video stream" />
+              <div class="video-placeholder" id="streamPlaceholder0">
+                <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.25"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+                <p>上传视频或输入流媒体地址以开始</p>
+              </div>
+            </div>
+            <div id="logBox0" class="log-box panel-log-box"></div>
           </div>
-          <div class="live-indicator" id="liveIndicator">
-            <span class="live-dot"></span>
-            LIVE
-          </div>
-        </div>
-        <div class="video-container">
-          <video id="streamPlayer" autoplay muted playsinline controls></video>
-          <img id="streamView" alt="video stream" />
-          <div class="video-placeholder" id="streamPlaceholder">
-            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.25"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
-            <p>上传视频或输入流媒体地址以开始</p>
+          <div class="video-panel" id="videoPanel1">
+            <div class="video-header">
+              <div>
+                <h2>面板 2 <span class="source-name" id="sourceName1"></span></h2>
+                <p class="video-meta" id="streamMeta1">等待输入视频源</p>
+              </div>
+              <div class="live-indicator" id="liveIndicator1">
+                <span class="live-dot"></span>
+                LIVE
+              </div>
+            </div>
+            <div class="video-container">
+              <video id="streamPlayer1" autoplay muted playsinline controls></video>
+              <img id="streamView1" alt="video stream" />
+              <div class="video-placeholder" id="streamPlaceholder1">
+                <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.25"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+                <p>上传视频或输入流媒体地址以开始</p>
+              </div>
+            </div>
+            <div id="logBox1" class="log-box panel-log-box"></div>
           </div>
         </div>
       </section>
@@ -134,7 +160,6 @@
             <button id="resetPromptBtn" class="btn btn-ghost btn-sm">恢复默认</button>
           </div>
         </div>
-        <div id="logBox" class="log-box"></div>
       </aside>
     </main>
   </div>
