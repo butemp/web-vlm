@@ -200,6 +200,60 @@ function stopNativePlayback(panelIdx) {
   }
 }
 
+async function attemptPlayerStart(player, timeoutMs = 2500) {
+  return await new Promise((resolve) => {
+    let settled = false;
+    let timer = null;
+
+    function cleanup() {
+      if (timer) clearTimeout(timer);
+      player.removeEventListener("loadeddata", onLoadedData);
+      player.removeEventListener("canplay", onCanPlay);
+      player.removeEventListener("playing", onPlaying);
+      player.removeEventListener("error", onError);
+    }
+
+    function finish(ok) {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(ok);
+    }
+
+    function onLoadedData() {
+      finish(true);
+    }
+
+    function onCanPlay() {
+      finish(true);
+    }
+
+    function onPlaying() {
+      finish(true);
+    }
+
+    function onError() {
+      finish(false);
+    }
+
+    player.addEventListener("loadeddata", onLoadedData);
+    player.addEventListener("canplay", onCanPlay);
+    player.addEventListener("playing", onPlaying);
+    player.addEventListener("error", onError);
+
+    timer = setTimeout(() => finish(false), timeoutMs);
+
+    try {
+      const playPromise = player.play();
+      if (playPromise && typeof playPromise.then === "function") {
+        playPromise.then(() => finish(true)).catch(() => finish(false));
+      }
+    } catch {
+      finish(false);
+    }
+  });
+}
+
 async function tryStartDirectPlayback(panelIdx) {
   const p = state.panels[panelIdx];
   const pe = el.panels[panelIdx];
@@ -219,39 +273,25 @@ async function tryStartDirectPlayback(panelIdx) {
 
     player.src = playbackUrl;
     player.style.display = "block";
-
-    const errorHandler = () => {
-      console.warn(`Panel ${panelIdx}: Native video playback failed, will use MJPEG stream`);
-      player.style.display = "none";
-      player.removeEventListener("error", errorHandler);
-    };
-    player.addEventListener("error", errorHandler);
-
-    try {
-      await player.play();
-      player.removeEventListener("error", errorHandler);
+    const started = await attemptPlayerStart(player, 2500);
+    if (started || player.readyState >= 2) {
       return true;
-    } catch (e) {
-      console.warn(`Panel ${panelIdx}: Native video play() failed:`, e);
-      await new Promise(r => setTimeout(r, 500));
-      if (player.readyState >= 2) {
-        return true;
-      }
-      player.style.display = "none";
-      return false;
     }
+    console.warn(`Panel ${panelIdx}: Native file playback timed out, fallback to MJPEG`);
+    player.style.display = "none";
+    return false;
   }
 
   if (sourceKind === "url" && isHlsUrl(playbackUrl)) {
     if (player.canPlayType("application/vnd.apple.mpegurl")) {
       player.src = playbackUrl;
       player.style.display = "block";
-      try {
-        await player.play();
-      } catch {
-        // ignore
+      const started = await attemptPlayerStart(player, 2500);
+      if (started || player.readyState >= 2) {
+        return true;
       }
-      return true;
+      player.style.display = "none";
+      return false;
     }
 
     if (window.Hls && window.Hls.isSupported()) {
