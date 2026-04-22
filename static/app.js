@@ -469,6 +469,57 @@ function setUploadFeedback(text = "", visible = true) {
   el.uploadFeedback.classList.toggle("hidden", !visible || !text);
 }
 
+function ensureBootDomReady() {
+  const requiredKeys = [
+    "sourceTypeSeg",
+    "modeSeg",
+    "uploadPanel",
+    "urlPanel",
+    "localPanel",
+    "videoFile",
+    "uploadBtn",
+    "streamUrl",
+    "urlBtn",
+    "localPath",
+    "localBtn",
+    "targetRow",
+    "targetInput",
+    "startBtn",
+    "stopBtn",
+    "statusChip",
+    "statusText",
+    "promptArea",
+    "promptInput",
+    "applyPromptBtn",
+    "resetPromptBtn",
+    "insightTitle",
+    "modeTag",
+    "fileDrop",
+    "fileDropText",
+    "themeToggleBtn",
+  ];
+
+  const missing = [];
+  for (const key of requiredKeys) {
+    if (!el[key]) missing.push(key);
+  }
+
+  for (let i = 0; i < PANEL_COUNT; i++) {
+    const panel = el.panels[i];
+    if (!panel) {
+      missing.push(`panels[${i}]`);
+      continue;
+    }
+    for (const key of ["panel", "streamPlayer", "streamView", "streamPlaceholder", "streamMeta", "liveIndicator", "logBox", "sourceName"]) {
+      if (!panel[key]) missing.push(`panels[${i}].${key}`);
+    }
+  }
+
+  if (missing.length > 0) {
+    throw new Error(`页面缺少必要节点: ${missing.join(", ")}`);
+  }
+}
+
 function updateButtonStates() {
   const anySource = state.panels.some(p => p.sourceId);
   const anyRunning = state.panels.some(p => p.runId);
@@ -855,6 +906,9 @@ async function uploadSingleVideoToPanel(file, panelIdx, actionToken, fileIndex, 
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
     const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
     const batchPrefix = totalFiles > 1 ? `[${fileIndex + 1}/${totalFiles}] ` : "";
+    setUploadFeedback(
+      `准备上传 ${fileIndex + 1}/${totalFiles}\n${file.name} (${sizeMB}MB，共 ${totalChunks} 片)`
+    );
     addLog(
       `⏳ ${batchPrefix}开始分片上传: ${file.name} (${sizeMB}MB, ${totalChunks} 片)`,
       panelIdx
@@ -876,6 +930,7 @@ async function uploadSingleVideoToPanel(file, panelIdx, actionToken, fileIndex, 
     // Step 1: Init upload session
     setStatus(`初始化上传 ${fileIndex + 1}/${totalFiles}...`, false);
     el.uploadBtn.textContent = totalFiles > 1 ? `初始化 ${fileIndex + 1}/${totalFiles}` : "初始化...";
+    setUploadFeedback(`初始化上传 ${fileIndex + 1}/${totalFiles}\n${file.name}`);
     let initData = null;
     const initPayload = JSON.stringify({
       filename: file.name,
@@ -906,6 +961,9 @@ async function uploadSingleVideoToPanel(file, panelIdx, actionToken, fileIndex, 
         const waitMs = 700 * attempt;
         setStatus(`初始化重试 ${fileIndex + 1}/${totalFiles}（${attempt}/${INIT_RETRIES - 1}）...`, false);
         el.uploadBtn.textContent = `重试 ${fileIndex + 1}/${totalFiles}`;
+        setUploadFeedback(
+          `初始化重试 ${fileIndex + 1}/${totalFiles}\n${file.name}\n第 ${attempt} 次重试`
+        );
         await new Promise((r) => setTimeout(r, waitMs));
         if (!isActionActive(actionToken)) return;
       }
@@ -949,6 +1007,9 @@ async function uploadSingleVideoToPanel(file, panelIdx, actionToken, fileIndex, 
             `上传 ${fileIndex + 1}/${totalFiles}: ${percent}% (${uploadedChunks}/${totalChunks})`,
             false
           );
+          setUploadFeedback(
+            `上传中 ${fileIndex + 1}/${totalFiles}\n${file.name}\n${percent}% (${uploadedChunks}/${totalChunks} 片)`
+          );
         } catch (err) {
           errors.push({ idx, err });
         }
@@ -969,6 +1030,7 @@ async function uploadSingleVideoToPanel(file, panelIdx, actionToken, fileIndex, 
     // Step 3: Complete / merge
     el.uploadBtn.textContent = totalFiles > 1 ? `合并 ${fileIndex + 1}/${totalFiles}` : "合并中...";
     setStatus(`合并文件 ${fileIndex + 1}/${totalFiles}...`, false);
+    setUploadFeedback(`合并文件 ${fileIndex + 1}/${totalFiles}\n${file.name}`);
     let data = null;
     const COMPLETE_RETRIES = 2;
     for (let attempt = 1; attempt <= COMPLETE_RETRIES; attempt++) {
@@ -1004,6 +1066,7 @@ async function uploadSingleVideoToPanel(file, panelIdx, actionToken, fileIndex, 
     pe.streamMeta.textContent = `来源: ${data.name} (${data.size_mb || "?"}MB)`;
     pe.sourceName.textContent = `— ${data.name}`;
     addLog(`✓ 已加载: ${data.name} (${data.size_mb}MB)`, panelIdx);
+    setUploadFeedback(`已完成 ${fileIndex + 1}/${totalFiles}\n${data.name} (${data.size_mb}MB)`);
     updateButtonStates();
     return data;
   } finally {
@@ -1024,6 +1087,7 @@ async function uploadVideo() {
   const files = Array.from(el.videoFile.files || []);
 
   if (files.length === 0) {
+    setUploadFeedback("还没有选择文件", true);
     addLog("⚠ 请先选择视频文件", panelIdx);
     releaseAction(actionToken);
     return;
@@ -1031,6 +1095,9 @@ async function uploadVideo() {
 
   const selectedFiles = files.slice(0, PANEL_COUNT);
   const targetPanels = getTargetPanelsForFiles(selectedFiles.length);
+  setUploadFeedback(
+    `已选择 ${selectedFiles.length} 个文件，准备上传\n${selectedFiles.map((file) => file.name).join("\n")}`
+  );
 
   if (files.length > PANEL_COUNT) {
     addLog(
@@ -1067,6 +1134,7 @@ async function uploadVideo() {
         successCount += 1;
       } catch (err) {
         if (!firstError) firstError = err;
+        setUploadFeedback(`上传失败\n${file.name}\n${err.message}`, true);
         addLog(`❌ 上传失败: ${file.name} - ${err.message}`, targetPanelIdx, true);
       }
     }
@@ -1078,6 +1146,12 @@ async function uploadVideo() {
         successCount === selectedFiles.length
           ? `${successCount} 个视频已就绪`
           : `已就绪 ${successCount}/${selectedFiles.length} 个视频`,
+        true
+      );
+      setUploadFeedback(
+        successCount === selectedFiles.length
+          ? `上传完成\n${selectedFiles.map((file) => file.name).join("\n")}`
+          : `部分完成\n已上传 ${successCount}/${selectedFiles.length} 个文件`,
         true
       );
       el.startBtn.classList.add("pulse-ready");
@@ -1184,6 +1258,8 @@ async function loadLocalFile() {
 
 /* ── Boot ── */
 async function boot() {
+  ensureBootDomReady();
+
   try {
     const data = await fetchJson("/api/defaults");
     state.defaultPrompt = data.default_prompt || "请简单描述一下这个视频";
@@ -1238,8 +1314,13 @@ el.modeSeg.addEventListener("click", async (e) => {
 });
 
 el.uploadBtn.addEventListener("click", async () => {
+  setUploadFeedback("开始上传…", true);
   try { await uploadVideo(); }
-  catch (err) { addLog(`❌ 上传失败: ${err.message}`, 0, true); setStatus("上传失败", false); }
+  catch (err) {
+    setUploadFeedback(`上传失败\n${err?.message || String(err)}`, true);
+    addLog(`❌ 上传失败: ${err.message}`, 0, true);
+    setStatus("上传失败", false);
+  }
 });
 
 el.urlBtn.addEventListener("click", async () => {
@@ -1317,12 +1398,20 @@ el.fileDrop.addEventListener("drop", (e) => {
   e.preventDefault();
   el.fileDrop.classList.remove("dragover");
   if (e.dataTransfer.files.length > 0) {
+    const files = Array.from(e.dataTransfer.files);
     el.videoFile.files = e.dataTransfer.files;
-    updateSelectedFilesLabel(Array.from(e.dataTransfer.files));
+    updateSelectedFilesLabel(files);
+    setUploadFeedback(`已选择 ${files.length} 个文件\n${files.map((file) => file.name).join("\n")}`, true);
   }
 });
 el.videoFile.addEventListener("change", () => {
-  updateSelectedFilesLabel(Array.from(el.videoFile.files || []));
+  const files = Array.from(el.videoFile.files || []);
+  updateSelectedFilesLabel(files);
+  if (files.length > 0) {
+    setUploadFeedback(`已选择 ${files.length} 个文件\n${files.map((file) => file.name).join("\n")}`, true);
+  } else {
+    setUploadFeedback("", false);
+  }
 });
 
 window.addEventListener("beforeunload", () => {
@@ -1347,6 +1436,8 @@ window.addEventListener("beforeunload", () => {
 });
 
 boot().catch((err) => {
+  console.error("boot failed:", err);
+  setUploadFeedback(`初始化失败\n${err?.message || String(err)}`, true);
   addLog(`❌ 初始化失败: ${err.message}`, 0, true);
   setStatus("初始化失败", false);
 });
