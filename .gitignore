@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Uploads (user data, not source)
+uploads/
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
