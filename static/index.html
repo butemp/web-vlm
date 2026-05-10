@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0A0A0F" />
+  <title>VISion — Video Intelligence Studio</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css?v=20260423-1" />
+</head>
+<body>
+  <div class="bg-blob bg-blob-1"></div>
+  <div class="bg-blob bg-blob-2"></div>
+  <div class="bg-blob bg-blob-3"></div>
+
+  <div class="app-container">
+    <header class="top-bar">
+      <div class="top-bar-left">
+        <div class="logo">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+          <span class="logo-text">VIS<span class="logo-accent">ion</span></span>
+        </div>
+        <span class="logo-sub">Video Intelligence Studio</span>
+      </div>
+      <div class="top-bar-right">
+        <button id="themeToggleBtn" class="btn btn-ghost btn-sm theme-toggle-btn" type="button">
+          切换浅色
+        </button>
+        <div class="status-chip" id="statusChip">
+          <span class="status-dot"></span>
+          <span class="status-text" id="statusText">等待连接</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="main-grid">
+      <!-- Left Panel -->
+      <aside class="panel panel-controls">
+        <div class="panel-inner">
+          <section class="ctrl-section">
+            <div class="section-header">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              <h2>输入源</h2>
+            </div>
+            <div class="tab-group" id="sourceTypeSeg">
+              <button class="tab-btn active" data-source-type="upload">上传视频</button>
+              <button class="tab-btn" data-source-type="url">流媒体 URL</button>
+              <button class="tab-btn" data-source-type="local">服务器文件</button>
+            </div>
+            <div id="uploadPanel" class="source-panel">
+              <label class="file-drop" id="fileDrop">
+                <input type="file" id="videoFile" accept="video/*" multiple hidden />
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.4"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                <span class="file-drop-text" id="fileDropText">点击或拖拽一个或多个视频文件</span>
+                <span class="file-drop-hint">MP4 / AVI / MKV, 每个文件 max 500MB</span>
+              </label>
+              <button id="uploadBtn" class="btn btn-primary btn-block">上传并加载所选视频</button>
+              <div id="uploadFeedback" class="upload-feedback hidden"></div>
+            </div>
+            <div id="urlPanel" class="source-panel hidden">
+              <div class="input-group">
+                <input type="text" id="streamUrl" class="input" placeholder="rtsp://... 或 http://..." />
+              </div>
+              <button id="urlBtn" class="btn btn-primary btn-block">连接视频流</button>
+            </div>
+            <div id="localPanel" class="source-panel hidden">
+              <div class="input-group">
+                <input type="text" id="localPath" class="input" placeholder="/data/videos/demo.mp4" />
+              </div>
+              <span class="file-drop-hint">先通过 scp 传到服务器，再填写服务器上的文件路径</span>
+              <button id="localBtn" class="btn btn-primary btn-block">加载本地文件</button>
+            </div>
+          </section>
+
+          <section class="ctrl-section">
+            <div class="section-header">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+              <h2>分析模式</h2>
+            </div>
+            <div class="tab-group" id="modeSeg">
+              <button class="tab-btn active" data-mode="infer">VLM 推理</button>
+              <button class="tab-btn" data-mode="detect">目标检测</button>
+            </div>
+            <div id="targetRow" class="hidden">
+              <label class="label">检测目标（逗号分隔）</label>
+              <input id="targetInput" class="input" type="text" placeholder="person, car, bicycle" />
+            </div>
+          </section>
+
+          <div class="ctrl-actions">
+            <button id="startBtn" class="btn btn-accent btn-block" disabled>开始分析</button>
+            <button id="stopBtn" class="btn btn-ghost btn-block" disabled>停止</button>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Center: Video Panels -->
+      <section class="panel panel-video-wrapper">
+        <div class="video-panels-container">
+          <div class="video-panel" id="videoPanel0">
+            <div class="video-header">
+              <div>
+                <h2>面板 1 <span class="source-name" id="sourceName0"></span></h2>
+                <p class="video-meta" id="streamMeta0">等待输入视频源</p>
+              </div>
+              <div class="live-indicator" id="liveIndicator0">
+                <span class="live-dot"></span>
+                LIVE
+              </div>
+            </div>
+            <div class="video-container">
+              <video id="streamPlayer0" autoplay muted playsinline controls></video>
+              <img id="streamView0" alt="video stream" />
+              <div class="video-placeholder" id="streamPlaceholder0">
+                <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.25"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+                <p>上传视频或输入流媒体地址以开始</p>
+              </div>
+            </div>
+            <div id="logBox0" class="log-box panel-log-box"></div>
+          </div>
+          <div class="video-panel" id="videoPanel1">
+            <div class="video-header">
+              <div>
+                <h2>面板 2 <span class="source-name" id="sourceName1"></span></h2>
+                <p class="video-meta" id="streamMeta1">等待输入视频源</p>
+              </div>
+              <div class="live-indicator" id="liveIndicator1">
+                <span class="live-dot"></span>
+                LIVE
+              </div>
+            </div>
+            <div class="video-container">
+              <video id="streamPlayer1" autoplay muted playsinline controls></video>
+              <img id="streamView1" alt="video stream" />
+              <div class="video-placeholder" id="streamPlaceholder1">
+                <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.25"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+                <p>上传视频或输入流媒体地址以开始</p>
+              </div>
+            </div>
+            <div id="logBox1" class="log-box panel-log-box"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right Panel -->
+      <aside class="panel panel-output">
+        <div class="output-header">
+          <div>
+            <h2 id="insightTitle">推理输出</h2>
+            <p class="output-sub">流式输出 · 最新结果置底</p>
+          </div>
+          <span class="model-tag" id="modeTag">VLM-Online</span>
+        </div>
+        <div id="promptArea" class="prompt-section">
+          <label class="label">在线视频检测</label>
+          <div class="preset-prompts-grid" id="presetPromptsGrid">
+            <button class="preset-prompt-btn" data-prompt="视频中是否发生了火灾或存在明火、烟雾、火焰等火灾隐患？请详细描述。">
+              <span class="preset-icon">🔥</span>
+              <span class="preset-text">火灾检测</span>
+            </button>
+            <button class="preset-prompt-btn" data-prompt="视频中是否有人在进行打架斗殴、暴力冲突或攻击行为？请描述具体情况。">
+              <span class="preset-icon">⚠️</span>
+              <span class="preset-text">打架斗殴</span>
+            </button>
+            <button class="preset-prompt-btn" data-prompt="视频中是否包含不良内容、色情、暴力或违规信息？">
+              <span class="preset-icon">🚫</span>
+              <span class="preset-text">不良内容</span>
+            </button>
+            <button class="preset-prompt-btn" data-prompt="视频中是否存在交通违法行为，如闯红灯、逆行、违章停车等？">
+              <span class="preset-icon">🚦</span>
+              <span class="preset-text">交通违法</span>
+            </button>
+            <button class="preset-prompt-btn" data-prompt="视频中是否存在异常人群聚集、拥挤踩踏风险或人群失控现象？">
+              <span class="preset-icon">👥</span>
+              <span class="preset-text">人群异常</span>
+            </button>
+            <button class="preset-prompt-btn" data-prompt="视频中是否存在明显安全隐患，如设施损坏、危险物品、高空坠物等？">
+              <span class="preset-icon">⚡</span>
+              <span class="preset-text">安全隐患</span>
+            </button>
+            <button class="preset-prompt-btn" data-prompt="请简单描述一下这个视频的内容和主要场景。">
+              <span class="preset-icon">📹</span>
+              <span class="preset-text">通用描述</span>
+            </button>
+            <button class="preset-prompt-btn" data-prompt="视频中是否有可疑人员或异常行为？请详细说明。">
+              <span class="preset-icon">🔍</span>
+              <span class="preset-text">异常行为</span>
+            </button>
+          </div>
+          <label class="label" style="margin-top: 10px;" for="promptInput">自定义指令</label>
+          <textarea id="promptInput" class="textarea" rows="3" placeholder="输入自定义检测指令..."></textarea>
+          <div class="prompt-actions">
+            <button id="applyPromptBtn" class="btn btn-primary btn-sm">开始检测</button>
+            <button id="resetPromptBtn" class="btn btn-ghost btn-sm">恢复默认</button>
+          </div>
+        </div>
+      </aside>
+    </main>
+  </div>
+  <script src="/static/app.js?v=20260422-2"></script>
+  <script async src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15"></script>
+</body>
+</html>
