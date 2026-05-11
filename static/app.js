@@ -534,7 +534,7 @@ function getTargetPanelsForFiles(fileCount) {
 
   // Potentially create new panels
   const available = [...emptyPanels, ...occupiedPanels];
-  while (available.length < fileCount && state.activePanelCount + (available.length - emptyPanels.length - occupiedPanels.length) < MAX_PANELS) {
+  while (available.length < fileCount && state.activePanelCount < MAX_PANELS) {
     const newIdx = createVideoPanel(state.activePanelCount);
     available.push(newIdx);
   }
@@ -778,17 +778,19 @@ function buildPanelPrompt(panelIdx) {
     return state.defaultPrompt;
   }
 
+  const NO_ANOMALY_SUFFIX = "如未发现异常请简要回复"无明显异常"。";
+
   // Single preset, no custom
   if (presetNames.length === 1 && !custom) {
     // Return the original full prompt for single selection
-    for (const prompt of p.selectedPresets) return prompt;
+    for (const prompt of p.selectedPresets) return prompt + NO_ANOMALY_SUFFIX;
   }
 
   // Multiple presets or preset + custom: merge into one sentence
   const allParts = [...presetNames];
   if (custom) allParts.push(custom);
 
-  return `请检测视频中是否存在以下情况：${allParts.join("、")}。如有发现请详细描述。`;
+  return `请检测视频中是否存在以下情况：${allParts.join("、")}。如有发现请详细描述，${NO_ANOMALY_SUFFIX}`;
 }
 
 /* ── UI State ── */

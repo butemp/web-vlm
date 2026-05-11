@@ -527,7 +527,7 @@ class ThreadedFrameReader:
 
     def _reader_loop(self):
         retry_count = 0
-        max_retries = 3
+        max_retries = 10
         stream_consecutive_fails = 0
         stream_reconnects = 0
         while not self.stopped:
@@ -564,6 +564,7 @@ class ThreadedFrameReader:
                             pass
                         return
                     self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    time.sleep(0.15)
                     continue
                 else:
                     # Network stream: track consecutive failures and attempt reconnect
@@ -1650,7 +1651,7 @@ async def infer_stream(
         fps = 12.0
         sample_every_n = 1
         frame_idx = 0
-        max_loop_retries = 3
+        max_loop_retries = 10
         retry_count = 0
         last_infer_ts = 0.0
         infer_count = 0
@@ -1719,6 +1720,7 @@ async def infer_stream(
                             if retry_count > max_loop_retries:
                                 break
                             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                            await asyncio.sleep(0.15)
                             continue
                         await asyncio.sleep(0.2)
                         continue
