@@ -642,11 +642,12 @@ function setupDrawers() {
   const OPEN_DELAY = 300;
   const CLOSE_DELAY = 400;
 
-  function setupDrawer(triggerEl, drawerEl, side) {
+  function setupDrawer(triggerEl, drawerEl, tabBtn, side) {
     function openDrawer() {
       clearTimeout(state.drawerTimers[side]);
       state.drawerTimers[side] = setTimeout(() => {
         drawerEl.classList.add("open");
+        if (tabBtn) tabBtn.classList.add("active");
       }, OPEN_DELAY);
     }
 
@@ -654,6 +655,7 @@ function setupDrawers() {
       clearTimeout(state.drawerTimers[side]);
       state.drawerTimers[side] = setTimeout(() => {
         drawerEl.classList.remove("open");
+        if (tabBtn) tabBtn.classList.remove("active");
       }, CLOSE_DELAY);
     }
 
@@ -661,15 +663,30 @@ function setupDrawers() {
       clearTimeout(state.drawerTimers[side]);
     }
 
+    function toggleDrawer(e) {
+      e.stopPropagation();
+      clearTimeout(state.drawerTimers[side]);
+      const isOpen = drawerEl.classList.contains("open");
+      drawerEl.classList.toggle("open", !isOpen);
+      if (tabBtn) tabBtn.classList.toggle("active", !isOpen);
+    }
+
     triggerEl.addEventListener("mouseenter", openDrawer);
     triggerEl.addEventListener("mouseleave", closeDrawer);
 
     drawerEl.addEventListener("mouseenter", cancelClose);
     drawerEl.addEventListener("mouseleave", closeDrawer);
+
+    if (tabBtn) {
+      tabBtn.addEventListener("click", toggleDrawer);
+    }
   }
 
-  setupDrawer(el.drawerTriggerLeft, el.drawerLeft, "left");
-  setupDrawer(el.drawerTriggerRight, el.drawerRight, "right");
+  const tabLeft = document.getElementById("drawerTabLeft");
+  const tabRight = document.getElementById("drawerTabRight");
+
+  setupDrawer(el.drawerTriggerLeft, el.drawerLeft, tabLeft, "left");
+  setupDrawer(el.drawerTriggerRight, el.drawerRight, tabRight, "right");
 }
 
 /* ── Panel Tabs (right drawer) ── */

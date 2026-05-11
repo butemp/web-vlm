@@ -296,14 +296,69 @@ body[data-theme="light"] .bg-blob {
   bottom: 0;
   width: 48px;
   z-index: 20;
+  display: flex;
+  align-items: center;
 }
 
 .drawer-trigger-left {
   left: 0;
+  justify-content: flex-start;
 }
 
 .drawer-trigger-right {
   right: 0;
+  justify-content: flex-end;
+}
+
+/* Visible drawer tab buttons */
+.drawer-tab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 56px;
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: all var(--transition-base);
+  padding: 0;
+}
+
+.drawer-tab:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+  color: var(--accent);
+  width: 28px;
+}
+
+.drawer-tab-left {
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  border-left: none;
+}
+
+.drawer-tab-left svg {
+  transform: rotate(180deg);
+  transition: transform var(--transition-base);
+}
+
+.drawer-tab-left.active svg {
+  transform: rotate(0deg);
+}
+
+.drawer-tab-right {
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+  border-right: none;
+}
+
+.drawer-tab-right svg {
+  transition: transform var(--transition-base);
+}
+
+.drawer-tab-right.active svg {
+  transform: rotate(180deg);
 }
 
 /* ── Drawers ── */
