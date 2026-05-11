@@ -639,54 +639,7 @@ function resetToInitialViewState() {
 
 /* ── Drawer Interaction ── */
 function setupDrawers() {
-  const OPEN_DELAY = 300;
-  const CLOSE_DELAY = 400;
-
-  function setupDrawer(triggerEl, drawerEl, tabBtn, side) {
-    function openDrawer() {
-      clearTimeout(state.drawerTimers[side]);
-      state.drawerTimers[side] = setTimeout(() => {
-        drawerEl.classList.add("open");
-        if (tabBtn) tabBtn.classList.add("active");
-      }, OPEN_DELAY);
-    }
-
-    function closeDrawer() {
-      clearTimeout(state.drawerTimers[side]);
-      state.drawerTimers[side] = setTimeout(() => {
-        drawerEl.classList.remove("open");
-        if (tabBtn) tabBtn.classList.remove("active");
-      }, CLOSE_DELAY);
-    }
-
-    function cancelClose() {
-      clearTimeout(state.drawerTimers[side]);
-    }
-
-    function toggleDrawer(e) {
-      e.stopPropagation();
-      clearTimeout(state.drawerTimers[side]);
-      const isOpen = drawerEl.classList.contains("open");
-      drawerEl.classList.toggle("open", !isOpen);
-      if (tabBtn) tabBtn.classList.toggle("active", !isOpen);
-    }
-
-    triggerEl.addEventListener("mouseenter", openDrawer);
-    triggerEl.addEventListener("mouseleave", closeDrawer);
-
-    drawerEl.addEventListener("mouseenter", cancelClose);
-    drawerEl.addEventListener("mouseleave", closeDrawer);
-
-    if (tabBtn) {
-      tabBtn.addEventListener("click", toggleDrawer);
-    }
-  }
-
-  const tabLeft = document.getElementById("drawerTabLeft");
-  const tabRight = document.getElementById("drawerTabRight");
-
-  setupDrawer(el.drawerTriggerLeft, el.drawerLeft, tabLeft, "left");
-  setupDrawer(el.drawerTriggerRight, el.drawerRight, tabRight, "right");
+  // Pure click toggle — no hover, no conflicts
 }
 
 /* ── Panel Tabs (right drawer) ── */
@@ -795,7 +748,7 @@ function buildPanelPrompt(panelIdx) {
     return state.defaultPrompt;
   }
 
-  const NO_ANOMALY_SUFFIX = "如未发现异常请简要回复"无明显异常"。";
+  const NO_ANOMALY_SUFFIX = '如未发现异常请简要回复"无明显异常"。';
 
   // Single preset, no custom
   if (presetNames.length === 1 && !custom) {
@@ -1728,11 +1681,9 @@ function bindEvents() {
 }
 
 /* ── Init ── */
-document.addEventListener("DOMContentLoaded", () => {
-  bindEvents();
-  boot().catch((err) => {
-    console.error("boot failed:", err);
-    setUploadFeedback(`初始化失败\n${err?.message || String(err)}`, true);
-    setStatus("初始化失败", false);
-  });
+bindEvents();
+boot().catch((err) => {
+  console.error("boot failed:", err);
+  setUploadFeedback(`初始化失败\n${err?.message || String(err)}`, true);
+  setStatus("初始化失败", false);
 });

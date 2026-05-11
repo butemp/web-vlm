@@ -39,7 +39,7 @@
       <!-- Left Drawer Trigger -->
       <div class="drawer-trigger drawer-trigger-left" id="drawerTriggerLeft">
         <button class="drawer-tab drawer-tab-left" id="drawerTabLeft" title="控制面板"
-          onclick="document.getElementById('drawerLeft').classList.toggle('open');this.classList.toggle('active')">
+          onclick="var d=document.getElementById('drawerLeft');d.classList.toggle('open');this.classList.toggle('active');">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
         </button>
       </div>
@@ -122,7 +122,7 @@
       <!-- Right Drawer Trigger -->
       <div class="drawer-trigger drawer-trigger-right" id="drawerTriggerRight">
         <button class="drawer-tab drawer-tab-right" id="drawerTabRight" title="检测配置"
-          onclick="document.getElementById('drawerRight').classList.toggle('open');this.classList.toggle('active')">
+          onclick="var d=document.getElementById('drawerRight');d.classList.toggle('open');this.classList.toggle('active');">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
         </button>
       </div>
