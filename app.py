@@ -138,6 +138,16 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 @app.middleware("http")
+async def no_cache_static_middleware(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith("/static/") and path.endswith((".js", ".css", ".html")):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
+
+@app.middleware("http")
 async def log_request_middleware(request: Request, call_next):
     path = request.url.path
     if not path.startswith("/api/"):
@@ -856,7 +866,14 @@ def _draw_detections(frame: np.ndarray, detections: List[Dict[str, object]]) -> 
 # ---------------------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
 async def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(
+        STATIC_DIR / "index.html",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @app.get("/api/defaults")
