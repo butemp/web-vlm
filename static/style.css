@@ -193,6 +193,18 @@ body[data-theme="light"] .bg-blob {
   color: var(--accent);
 }
 
+.logo-img {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  object-fit: cover;
+  transition: transform var(--transition-base);
+}
+
+.logo:hover .logo-img {
+  transform: scale(1.06);
+}
+
 .logo svg {
   transition: transform var(--transition-base);
 }
@@ -202,9 +214,9 @@ body[data-theme="light"] .bg-blob {
 }
 
 .logo-text {
-  font-size: 17px;
+  font-size: 16px;
   font-weight: 700;
-  letter-spacing: -0.4px;
+  letter-spacing: 0.5px;
   color: var(--text-primary);
 }
 
@@ -282,7 +294,7 @@ body[data-theme="light"] .bg-blob {
   position: absolute;
   top: 0;
   bottom: 0;
-  width: 24px;
+  width: 48px;
   z-index: 20;
 }
 

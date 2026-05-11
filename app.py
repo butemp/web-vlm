@@ -70,7 +70,7 @@ QWEN_MODEL_PATH = "/home/nanguoshun/ckpt/Qwen/Qwen2.5-VL-3B-Instruct"
 YOLO_MODEL_PATH = "/home/nanguoshun/ckpt/yolov8x.pt"
 
 GPU_DEVICE = "cuda:0"
-QWEN_MAX_NEW_TOKENS = 32
+QWEN_MAX_NEW_TOKENS = 256
 QWEN_MAX_IMAGE_EDGE = 640
 YOLO_CONF = 0.25
 YOLO_IMGSZ = 640
@@ -95,8 +95,8 @@ NETWORK_OPEN_TIMEOUT_MSEC = 15000
 NETWORK_READ_TIMEOUT_MSEC = 8000
 INFER_CACHE_EVERY_N_FRAMES = 2
 INFER_MIN_INTERVAL_SEC = 1.2
-INFER_CACHE_MAX_AGE_SEC = 2.0
-INFER_CACHE_WAIT_SEC = 2.5
+INFER_CACHE_MAX_AGE_SEC = 8.0
+INFER_CACHE_WAIT_SEC = 5.0
 INFER_CACHE_POLL_INTERVAL_SEC = 0.05
 PRELOAD_QWEN_ON_STARTUP = True
 
@@ -124,7 +124,7 @@ _encode_executor = concurrent.futures.ThreadPoolExecutor(
 )
 # Separate executor for YOLO detection to avoid starving the default asyncio pool
 _yolo_executor = concurrent.futures.ThreadPoolExecutor(
-    max_workers=2, thread_name_prefix="yolo-det"
+    max_workers=3, thread_name_prefix="yolo-det"
 )
 
 app = FastAPI(title="Realtime Video Inference Demo", version="0.2.0")
@@ -1734,7 +1734,12 @@ async def infer_stream(
                 if frame is None:
                     await asyncio.sleep(INFER_CACHE_POLL_INTERVAL_SEC)
                     continue
-                if (time.monotonic() - last_infer_ts) < INFER_MIN_INTERVAL_SEC:
+                # Dynamically scale inference interval by active run count
+                # so panels don't starve each other waiting on _qwen_lock.
+                with _active_runs_lock:
+                    _n_active = max(1, len(_active_runs))
+                _dynamic_interval = INFER_MIN_INTERVAL_SEC * _n_active
+                if (time.monotonic() - last_infer_ts) < _dynamic_interval:
                     await asyncio.sleep(0.03)
                     continue
                 last_infer_ts = time.monotonic()

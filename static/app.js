@@ -56,6 +56,7 @@ const el = {
   panelTabsBar: document.getElementById("panelTabsBar"),
   mixedDetectIndicator: document.getElementById("mixedDetectIndicator"),
   mixedDetectDesc: document.getElementById("mixedDetectDesc"),
+  clearAllBtn: document.getElementById("clearAllBtn"),
   panels: [],
 };
 
@@ -563,6 +564,9 @@ function updateButtonStates() {
   const anyRunning = state.panels.some(p => p && p.runId);
   el.startBtn.disabled = anyRunning || !anySource;
   el.stopBtn.disabled = !anyRunning;
+  if (el.clearAllBtn) {
+    el.clearAllBtn.disabled = !anySource && state.activePanelCount === 0;
+  }
 }
 
 function bestEffortStopRun(sourceId, runId) {
@@ -758,39 +762,33 @@ function buildPanelPrompt(panelIdx) {
   const p = state.panels[panelIdx];
   if (!p) return state.defaultPrompt;
 
-  const presetPrompts = [];
+  // Collect selected preset short names and prompts
+  const presetNames = [];
   if (p.selectedPresets.size > 0) {
     el.presetPromptsGrid?.querySelectorAll(".preset-prompt-btn").forEach(btn => {
       if (p.selectedPresets.has(btn.dataset.prompt)) {
-        presetPrompts.push(btn.dataset.prompt);
+        presetNames.push(btn.querySelector(".preset-text").textContent);
       }
     });
   }
 
   const custom = p.customPrompt?.trim() || "";
 
-  if (presetPrompts.length === 0 && !custom) {
+  if (presetNames.length === 0 && !custom) {
     return state.defaultPrompt;
   }
 
-  if (presetPrompts.length === 1 && !custom) {
-    return presetPrompts[0];
+  // Single preset, no custom
+  if (presetNames.length === 1 && !custom) {
+    // Return the original full prompt for single selection
+    for (const prompt of p.selectedPresets) return prompt;
   }
 
-  // Multiple presets / mixed mode
-  const parts = [];
-  presetPrompts.forEach((prompt, i) => {
-    parts.push(`${i + 1}. ${prompt}`);
-  });
-  if (custom) {
-    parts.push(`${parts.length + 1}. ${custom}`);
-  }
+  // Multiple presets or preset + custom: merge into one sentence
+  const allParts = [...presetNames];
+  if (custom) allParts.push(custom);
 
-  if (parts.length > 1) {
-    return "请依次检测以下场景：\n" + parts.join("\n");
-  }
-
-  return custom || state.defaultPrompt;
+  return `请检测视频中是否存在以下情况：${allParts.join("、")}。如有发现请详细描述。`;
 }
 
 /* ── UI State ── */
@@ -1609,6 +1607,16 @@ el.stopBtn.addEventListener("click", async () => {
     }
   }
 });
+
+if (el.clearAllBtn) {
+  el.clearAllBtn.addEventListener("click", async () => {
+    await stopAnalysis(true, true, true, false);
+    if (el.videoFile) el.videoFile.value = "";
+    updateSelectedFilesLabel([]);
+    setUploadFeedback("", false);
+    setStatus("已清空所有视频源", false);
+  });
+}
 
 el.applyPromptBtn.addEventListener("click", async () => {
   if (state.mode !== "infer") return;
