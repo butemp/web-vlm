@@ -295,7 +295,7 @@ body[data-theme="light"] .bg-blob {
   top: 0;
   bottom: 0;
   width: 28px;
-  z-index: 20;
+  z-index: 40;
   display: flex;
   align-items: center;
   pointer-events: none;
