@@ -1526,19 +1526,19 @@ async function boot() {
 }
 
 /* ── Event Listeners ── */
-el.sourceTypeSeg.addEventListener("click", async (e) => {
-  const btn = e.target.closest("button[data-source-type]");
-  if (!btn) return;
-  if (state.panels.some(p => p && p.runId)) {
-    await stopAnalysis(true, false, true, true);
-  }
-  state.sourceType = btn.dataset.sourceType;
-  updateSourceTypeUI();
-});
+function bindEvents() {
+  el.sourceTypeSeg?.addEventListener("click", async (e) => {
+    const btn = e.target.closest("button[data-source-type]");
+    if (!btn) return;
+    if (state.panels.some(p => p && p.runId)) {
+      await stopAnalysis(true, false, true, true);
+    }
+    state.sourceType = btn.dataset.sourceType;
+    updateSourceTypeUI();
+  });
 
-// Preset prompt buttons — multi-select toggle
-if (el.presetPromptsGrid) {
-  el.presetPromptsGrid.addEventListener("click", (e) => {
+  // Preset prompt buttons — multi-select toggle
+  el.presetPromptsGrid?.addEventListener("click", (e) => {
     const btn = e.target.closest(".preset-prompt-btn");
     if (!btn) return;
 
@@ -1557,184 +1557,182 @@ if (el.presetPromptsGrid) {
 
     updateMixedDetectIndicator(state.configPanelIdx);
   });
-}
 
-el.modeSeg.addEventListener("click", async (e) => {
-  const btn = e.target.closest("button[data-mode]");
-  if (!btn) return;
+  el.modeSeg?.addEventListener("click", async (e) => {
+    const btn = e.target.closest("button[data-mode]");
+    if (!btn) return;
 
-  if (state.panels.some(p => p && p.runId)) {
-    await stopAnalysis(true, false, true, true);
-  }
-  state.mode = btn.dataset.mode;
-  updateModeUI();
-  for (let i = 0; i < state.activePanelCount; i++) {
-    clearLogs(i);
-  }
-  updateButtonStates();
-});
-
-el.uploadBtn.addEventListener("click", async () => {
-  setUploadFeedback("开始上传…", true);
-  try { await uploadVideo(); }
-  catch (err) {
-    setUploadFeedback(`上传失败\n${err?.message || String(err)}`, true);
-    const logPanel = state.activePanelCount > 0 ? 0 : 0;
-    if (state.activePanelCount > 0) {
-      addLog(`❌ 上传失败: ${err.message}`, 0, true);
+    if (state.panels.some(p => p && p.runId)) {
+      await stopAnalysis(true, false, true, true);
     }
-    setStatus("上传失败", false);
-  }
-});
-
-el.urlBtn.addEventListener("click", async () => {
-  try { await registerUrl(); }
-  catch (err) {
-    if (state.activePanelCount > 0) addLog(`❌ 连接失败: ${err.message}`, 0, true);
-    setStatus("连接失败", false);
-  }
-});
-
-el.localBtn.addEventListener("click", async () => {
-  try { await loadLocalFile(); }
-  catch (err) {
-    if (state.activePanelCount > 0) addLog(`❌ 加载失败: ${err.message}`, 0, true);
-    setStatus("加载失败", false);
-  }
-});
-
-el.startBtn.addEventListener("click", async () => {
-  const origText = el.startBtn.textContent;
-  el.startBtn.textContent = "启动中...";
-  el.startBtn.disabled = true;
-  try {
-    await startAllStreams();
-  } catch (err) {
-    if (state.activePanelCount > 0) addLog(`❌ 启动失败: ${err.message}`, 0, true);
-    setStatus("启动失败", false);
-  } finally {
-    el.startBtn.textContent = origText;
+    state.mode = btn.dataset.mode;
+    updateModeUI();
+    for (let i = 0; i < state.activePanelCount; i++) {
+      clearLogs(i);
+    }
     updateButtonStates();
-  }
-});
+  });
 
-el.stopBtn.addEventListener("click", async () => {
-  await stopAnalysis(true, false);
-  for (let i = 0; i < state.activePanelCount; i++) {
-    if (state.panels[i] && state.panels[i].sourceId) {
-      addLog("■ 分析已停止，可重新点击「开始分析」继续", i);
+  el.uploadBtn?.addEventListener("click", async () => {
+    setUploadFeedback("开始上传…", true);
+    try { await uploadVideo(); }
+    catch (err) {
+      setUploadFeedback(`上传失败\n${err?.message || String(err)}`, true);
+      if (state.activePanelCount > 0) {
+        addLog(`❌ 上传失败: ${err.message}`, 0, true);
+      }
+      setStatus("上传失败", false);
     }
-  }
-});
+  });
 
-if (el.clearAllBtn) {
-  el.clearAllBtn.addEventListener("click", async () => {
+  el.urlBtn?.addEventListener("click", async () => {
+    try { await registerUrl(); }
+    catch (err) {
+      if (state.activePanelCount > 0) addLog(`❌ 连接失败: ${err.message}`, 0, true);
+      setStatus("连接失败", false);
+    }
+  });
+
+  el.localBtn?.addEventListener("click", async () => {
+    try { await loadLocalFile(); }
+    catch (err) {
+      if (state.activePanelCount > 0) addLog(`❌ 加载失败: ${err.message}`, 0, true);
+      setStatus("加载失败", false);
+    }
+  });
+
+  el.startBtn?.addEventListener("click", async () => {
+    const origText = el.startBtn.textContent;
+    el.startBtn.textContent = "启动中...";
+    el.startBtn.disabled = true;
+    try {
+      await startAllStreams();
+    } catch (err) {
+      if (state.activePanelCount > 0) addLog(`❌ 启动失败: ${err.message}`, 0, true);
+      setStatus("启动失败", false);
+    } finally {
+      el.startBtn.textContent = origText;
+      updateButtonStates();
+    }
+  });
+
+  el.stopBtn?.addEventListener("click", async () => {
+    await stopAnalysis(true, false);
+    for (let i = 0; i < state.activePanelCount; i++) {
+      if (state.panels[i] && state.panels[i].sourceId) {
+        addLog("■ 分析已停止，可重新点击「开始分析」继续", i);
+      }
+    }
+  });
+
+  el.clearAllBtn?.addEventListener("click", async () => {
     await stopAnalysis(true, true, true, false);
     if (el.videoFile) el.videoFile.value = "";
     updateSelectedFilesLabel([]);
     setUploadFeedback("", false);
     setStatus("已清空所有视频源", false);
   });
-}
 
-el.applyPromptBtn.addEventListener("click", async () => {
-  if (state.mode !== "infer") return;
-  if (!state.panels.some(p => p && p.sourceId)) {
-    if (state.activePanelCount > 0) addLog("⚠ 请先接入视频源", 0, true);
-    return;
-  }
-
-  // Save current config before starting
-  savePanelConfig(state.configPanelIdx);
-
-  for (let i = 0; i < state.activePanelCount; i++) {
-    if (state.panels[i] && state.panels[i].sourceId) {
-      const prompt = buildPanelPrompt(i);
-      const presetCount = state.panels[i].selectedPresets.size;
-      const label = presetCount > 1 ? "混合检测" : (presetCount === 1 ? "预设检测" : "自定义");
-      addLog(`→ 面板 ${i + 1}: 已应用 ${label}，重新开始流式推理...`, i, true);
+  el.applyPromptBtn?.addEventListener("click", async () => {
+    if (state.mode !== "infer") return;
+    if (!state.panels.some(p => p && p.sourceId)) {
+      if (state.activePanelCount > 0) addLog("⚠ 请先接入视频源", 0, true);
+      return;
     }
-  }
-  await startAllStreams();
-});
 
-el.resetPromptBtn.addEventListener("click", () => {
-  el.promptInput.value = state.defaultPrompt;
-  // Clear presets for current panel
-  el.presetPromptsGrid?.querySelectorAll(".preset-prompt-btn").forEach(b => {
-    b.classList.remove("active");
-  });
-  const p = state.panels[state.configPanelIdx];
-  if (p) {
-    p.selectedPresets.clear();
-    p.customPrompt = state.defaultPrompt;
-  }
-  updateMixedDetectIndicator(state.configPanelIdx);
-  for (let i = 0; i < state.activePanelCount; i++) {
-    if (state.panels[i] && state.panels[i].sourceId) {
-      addLog("→ 已恢复默认指令", i, true);
-    }
-  }
-});
+    // Save current config before starting
+    savePanelConfig(state.configPanelIdx);
 
-if (el.themeToggleBtn) {
-  el.themeToggleBtn.addEventListener("click", () => {
-    toggleTheme();
-  });
-}
-
-/* ── Drag & Drop ── */
-el.fileDrop.addEventListener("dragover", (e) => {
-  e.preventDefault();
-  el.fileDrop.classList.add("dragover");
-});
-el.fileDrop.addEventListener("dragleave", () => {
-  el.fileDrop.classList.remove("dragover");
-});
-el.fileDrop.addEventListener("drop", (e) => {
-  e.preventDefault();
-  el.fileDrop.classList.remove("dragover");
-  if (e.dataTransfer.files.length > 0) {
-    const files = Array.from(e.dataTransfer.files);
-    el.videoFile.files = e.dataTransfer.files;
-    updateSelectedFilesLabel(files);
-    setUploadFeedback(`已选择 ${files.length} 个文件\n${files.map((file) => file.name).join("\n")}`, true);
-  }
-});
-el.videoFile.addEventListener("change", () => {
-  const files = Array.from(el.videoFile.files || []);
-  updateSelectedFilesLabel(files);
-  if (files.length > 0) {
-    setUploadFeedback(`已选择 ${files.length} 个文件\n${files.map((file) => file.name).join("\n")}`, true);
-  } else {
-    setUploadFeedback("", false);
-  }
-});
-
-window.addEventListener("beforeunload", () => {
-  for (let i = 0; i < state.activePanelCount; i++) {
-    const p = state.panels[i];
-    if (!p) continue;
-    if (p.eventSource) p.eventSource.close();
-    stopNativePlayback(i);
-    if (p.sourceId && p.runId) {
-      try {
-        navigator.sendBeacon(
-          "/api/control/stop",
-          new Blob(
-            [JSON.stringify({ source_id: p.sourceId, run_id: p.runId })],
-            { type: "application/json" }
-          )
-        );
-      } catch {
-        // ignore
+    for (let i = 0; i < state.activePanelCount; i++) {
+      if (state.panels[i] && state.panels[i].sourceId) {
+        const presetCount = state.panels[i].selectedPresets.size;
+        const label = presetCount > 1 ? "混合检测" : (presetCount === 1 ? "预设检测" : "自定义");
+        addLog(`→ 面板 ${i + 1}: 已应用 ${label}，重新开始流式推理...`, i, true);
       }
     }
-  }
-});
+    await startAllStreams();
+  });
 
-boot().catch((err) => {
-  console.error("boot failed:", err);
-  setUploadFeedback(`初始化失败\n${err?.message || String(err)}`, true);
-  setStatus("初始化失败", false);
+  el.resetPromptBtn?.addEventListener("click", () => {
+    el.promptInput.value = state.defaultPrompt;
+    // Clear presets for current panel
+    el.presetPromptsGrid?.querySelectorAll(".preset-prompt-btn").forEach(b => {
+      b.classList.remove("active");
+    });
+    const p = state.panels[state.configPanelIdx];
+    if (p) {
+      p.selectedPresets.clear();
+      p.customPrompt = state.defaultPrompt;
+    }
+    updateMixedDetectIndicator(state.configPanelIdx);
+    for (let i = 0; i < state.activePanelCount; i++) {
+      if (state.panels[i] && state.panels[i].sourceId) {
+        addLog("→ 已恢复默认指令", i, true);
+      }
+    }
+  });
+
+  el.themeToggleBtn?.addEventListener("click", () => {
+    toggleTheme();
+  });
+
+  /* ── Drag & Drop ── */
+  el.fileDrop?.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    el.fileDrop.classList.add("dragover");
+  });
+  el.fileDrop?.addEventListener("dragleave", () => {
+    el.fileDrop.classList.remove("dragover");
+  });
+  el.fileDrop?.addEventListener("drop", (e) => {
+    e.preventDefault();
+    el.fileDrop.classList.remove("dragover");
+    if (e.dataTransfer.files.length > 0) {
+      const files = Array.from(e.dataTransfer.files);
+      el.videoFile.files = e.dataTransfer.files;
+      updateSelectedFilesLabel(files);
+      setUploadFeedback(`已选择 ${files.length} 个文件\n${files.map((file) => file.name).join("\n")}`, true);
+    }
+  });
+  el.videoFile?.addEventListener("change", () => {
+    const files = Array.from(el.videoFile.files || []);
+    updateSelectedFilesLabel(files);
+    if (files.length > 0) {
+      setUploadFeedback(`已选择 ${files.length} 个文件\n${files.map((file) => file.name).join("\n")}`, true);
+    } else {
+      setUploadFeedback("", false);
+    }
+  });
+
+  window.addEventListener("beforeunload", () => {
+    for (let i = 0; i < state.activePanelCount; i++) {
+      const p = state.panels[i];
+      if (!p) continue;
+      if (p.eventSource) p.eventSource.close();
+      stopNativePlayback(i);
+      if (p.sourceId && p.runId) {
+        try {
+          navigator.sendBeacon(
+            "/api/control/stop",
+            new Blob(
+              [JSON.stringify({ source_id: p.sourceId, run_id: p.runId })],
+              { type: "application/json" }
+            )
+          );
+        } catch {
+          // ignore
+        }
+      }
+    }
+  });
+}
+
+/* ── Init ── */
+document.addEventListener("DOMContentLoaded", () => {
+  bindEvents();
+  boot().catch((err) => {
+    console.error("boot failed:", err);
+    setUploadFeedback(`初始化失败\n${err?.message || String(err)}`, true);
+    setStatus("初始化失败", false);
+  });
 });
