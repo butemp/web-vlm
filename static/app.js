@@ -1365,7 +1365,12 @@ async function registerUrl() {
   }
   if (!isActionActive(actionToken)) return;
 
-  const url = el.streamUrl.value.trim();
+  let url = el.streamUrl.value.trim();
+  // 摄像头设备号自动填充为完整流地址
+  if (url === "41010500002000000002") {
+    url = "http://43.143.164.58:8080/rtp/41010500002000000002_41010500002000000002.live.mp4?originTypeStr=rtp_push&videoCodec=H265";
+    el.streamUrl.value = url;
+  }
   if (!url) {
     addLog("⚠ 请输入流媒体 URL", panelIdx);
     releaseAction(actionToken);
