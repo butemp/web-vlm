@@ -59,7 +59,7 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 DEFAULT_PROMPT = "请简单描述一下这个视频"
 MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500 MB
-MAX_CONCURRENT_RUNS = 2
+MAX_CONCURRENT_RUNS = 4
 
 # ---------------------------------------------------------------------------
 # Hardcoded model paths (edit here before deploying).

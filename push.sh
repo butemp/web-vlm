@@ -5,7 +5,7 @@
 set -e
 
 REMOTE="git@github.com:butemp/web-vlm.git"
-BRANCH="main"
+BRANCH="wsl_branch"
 
 # ── 代理配置（按需修改端口，不用代理则留空）──
 PROXY_PORT=""   # 常见: 7890 / 1080 / 8080，留空则不走代理

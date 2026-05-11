@@ -1,8 +1,8 @@
 /* ============================================================
-   Video Intelligence Studio — Frontend Logic (Dual Panel)
+   Video Intelligence Studio — Frontend Logic (Dynamic Panels)
    ============================================================ */
 
-const PANEL_COUNT = 2;
+const MAX_PANELS = 4;
 
 const state = {
   sourceType: "upload",
@@ -12,24 +12,11 @@ const state = {
   actionToken: 0,
   activeAction: "",
   uploadAbortController: null,
+  activePanelCount: 0,
+  configPanelIdx: 0,
   panels: [],
+  drawerTimers: { left: null, right: null },
 };
-
-// Initialize per-panel state
-for (let i = 0; i < PANEL_COUNT; i++) {
-  state.panels.push({
-    sourceId: null,
-    runId: null,
-    sourceKind: "",
-    playbackUrl: "",
-    eventSource: null,
-    hls: null,
-    activeLogNode: null,
-    mjpegStallTimer: null,
-    mjpegLastNaturalWidth: 0,
-    mjpegStallNotified: false,
-  });
-}
 
 const el = {
   sourceTypeSeg: document.getElementById("sourceTypeSeg"),
@@ -60,22 +47,17 @@ const el = {
   fileDropText: document.getElementById("fileDropText"),
   uploadFeedback: document.getElementById("uploadFeedback"),
   themeToggleBtn: document.getElementById("themeToggleBtn"),
+  drawerLeft: document.getElementById("drawerLeft"),
+  drawerRight: document.getElementById("drawerRight"),
+  drawerTriggerLeft: document.getElementById("drawerTriggerLeft"),
+  drawerTriggerRight: document.getElementById("drawerTriggerRight"),
+  videoStageGrid: document.getElementById("videoStageGrid"),
+  emptyStageHint: document.getElementById("emptyStageHint"),
+  panelTabsBar: document.getElementById("panelTabsBar"),
+  mixedDetectIndicator: document.getElementById("mixedDetectIndicator"),
+  mixedDetectDesc: document.getElementById("mixedDetectDesc"),
   panels: [],
 };
-
-// Initialize per-panel DOM elements
-for (let i = 0; i < PANEL_COUNT; i++) {
-  el.panels.push({
-    panel: document.getElementById(`videoPanel${i}`),
-    streamPlayer: document.getElementById(`streamPlayer${i}`),
-    streamView: document.getElementById(`streamView${i}`),
-    streamPlaceholder: document.getElementById(`streamPlaceholder${i}`),
-    streamMeta: document.getElementById(`streamMeta${i}`),
-    liveIndicator: document.getElementById(`liveIndicator${i}`),
-    logBox: document.getElementById(`logBox${i}`),
-    sourceName: document.getElementById(`sourceName${i}`),
-  });
-}
 
 /* ── Helpers ── */
 function setStatus(text, active = false) {
@@ -85,10 +67,10 @@ function setStatus(text, active = false) {
 
 function setLive(active, panelIdx) {
   if (panelIdx === undefined) {
-    for (let i = 0; i < PANEL_COUNT; i++) {
-      el.panels[i].liveIndicator.classList.toggle("active", active);
+    for (let i = 0; i < state.activePanelCount; i++) {
+      if (el.panels[i]) el.panels[i].liveIndicator.classList.toggle("active", active);
     }
-  } else {
+  } else if (el.panels[panelIdx]) {
     el.panels[panelIdx].liveIndicator.classList.toggle("active", active);
   }
 }
@@ -147,6 +129,7 @@ function isHlsUrl(url) {
 
 function stopMjpegStallDetection(panelIdx) {
   const p = state.panels[panelIdx];
+  if (!p) return;
   if (p.mjpegStallTimer) {
     clearInterval(p.mjpegStallTimer);
     p.mjpegStallTimer = null;
@@ -159,6 +142,7 @@ function startMjpegStallDetection(panelIdx) {
   stopMjpegStallDetection(panelIdx);
   const p = state.panels[panelIdx];
   const pe = el.panels[panelIdx];
+  if (!p || !pe) return;
   let unchangedTicks = 0;
   p.mjpegStallTimer = setInterval(() => {
     if (!p.runId || !pe.streamView || pe.streamView.style.display === "none") {
@@ -182,20 +166,13 @@ function startMjpegStallDetection(panelIdx) {
 function stopNativePlayback(panelIdx) {
   const p = state.panels[panelIdx];
   const pe = el.panels[panelIdx];
+  if (!p || !pe) return;
   if (p.hls) {
-    try {
-      p.hls.destroy();
-    } catch {
-      // ignore
-    }
+    try { p.hls.destroy(); } catch { /* ignore */ }
     p.hls = null;
   }
   if (pe.streamPlayer) {
-    try {
-      pe.streamPlayer.pause();
-    } catch {
-      // ignore
-    }
+    try { pe.streamPlayer.pause(); } catch { /* ignore */ }
     pe.streamPlayer.removeAttribute("src");
     pe.streamPlayer.load();
     pe.streamPlayer.style.display = "none";
@@ -222,21 +199,10 @@ async function attemptPlayerStart(player, timeoutMs = 2500) {
       resolve(ok);
     }
 
-    function onLoadedData() {
-      finish(true);
-    }
-
-    function onCanPlay() {
-      finish(true);
-    }
-
-    function onPlaying() {
-      finish(true);
-    }
-
-    function onError() {
-      finish(false);
-    }
+    function onLoadedData() { finish(true); }
+    function onCanPlay() { finish(true); }
+    function onPlaying() { finish(true); }
+    function onError() { finish(false); }
 
     player.addEventListener("loadeddata", onLoadedData);
     player.addEventListener("canplay", onCanPlay);
@@ -259,13 +225,9 @@ async function attemptPlayerStart(player, timeoutMs = 2500) {
 async function tryStartDirectPlayback(panelIdx) {
   const p = state.panels[panelIdx];
   const pe = el.panels[panelIdx];
-  if (!pe.streamPlayer) return false;
+  if (!p || !pe || !pe.streamPlayer) return false;
 
-  // Reliability first: infer mode uses backend MJPEG so display and inference
-  // stay on the same server-side decode path.
-  if (state.mode === "infer") {
-    return false;
-  }
+  if (state.mode === "infer") return false;
 
   const sourceKind = p.sourceKind || "";
   const playbackUrl = p.playbackUrl || "";
@@ -274,20 +236,14 @@ async function tryStartDirectPlayback(panelIdx) {
   stopNativePlayback(panelIdx);
   const player = pe.streamPlayer;
 
-  // Both infer and detect modes for file sources use backend MJPEG to keep
-  // server-side decode path and frontend display in sync.
-  if (sourceKind === "file") {
-    return false;
-  }
+  if (sourceKind === "file") return false;
 
   if (sourceKind === "url" && isHlsUrl(playbackUrl)) {
     if (player.canPlayType("application/vnd.apple.mpegurl")) {
       player.src = playbackUrl;
       player.style.display = "block";
       const started = await attemptPlayerStart(player, 2500);
-      if (started || player.readyState >= 2) {
-        return true;
-      }
+      if (started || player.readyState >= 2) return true;
       player.style.display = "none";
       return false;
     }
@@ -326,11 +282,7 @@ async function tryStartDirectPlayback(panelIdx) {
 function applyTheme(theme) {
   state.theme = theme === "light" ? "light" : "dark";
   document.body.dataset.theme = state.theme;
-  try {
-    localStorage.setItem("web_vlm_theme", state.theme);
-  } catch {
-    // ignore
-  }
+  try { localStorage.setItem("web_vlm_theme", state.theme); } catch { /* ignore */ }
   if (el.themeToggleBtn) {
     el.themeToggleBtn.textContent = state.theme === "dark" ? "切换浅色" : "切换深色";
   }
@@ -341,13 +293,17 @@ function toggleTheme() {
 }
 
 function clearLogs(panelIdx) {
+  if (!el.panels[panelIdx]) return;
   el.panels[panelIdx].logBox.innerHTML = "";
   state.panels[panelIdx].activeLogNode = null;
 }
 
 function addLog(message, panelIdx, markLatest = false) {
   const p = state.panels[panelIdx];
-  const logBox = el.panels[panelIdx].logBox;
+  const pe = el.panels[panelIdx];
+  if (!p || !pe) return;
+
+  const logBox = pe.logBox;
 
   if (markLatest && p.activeLogNode) {
     p.activeLogNode.classList.remove("latest");
@@ -373,7 +329,9 @@ function addLog(message, panelIdx, markLatest = false) {
 
 function appendToLatest(text, panelIdx) {
   const p = state.panels[panelIdx];
-  const logBox = el.panels[panelIdx].logBox;
+  const pe = el.panels[panelIdx];
+  if (!p || !pe) return;
+  const logBox = pe.logBox;
   if (!p.activeLogNode) {
     addLog(text, panelIdx, true);
     return;
@@ -403,11 +361,7 @@ function isAbortLikeError(err) {
   if (!err) return false;
   const name = String(err.name || "");
   const msg = String(err.message || "").toLowerCase();
-  return (
-    name === "AbortError" ||
-    msg.includes("aborted") ||
-    msg.includes("abort")
-  );
+  return name === "AbortError" || msg.includes("aborted") || msg.includes("abort");
 }
 
 function _is_run_active_local(panelIdx) {
@@ -415,12 +369,153 @@ function _is_run_active_local(panelIdx) {
     return state.panels.some(p => !!(p.sourceId && p.runId));
   }
   const p = state.panels[panelIdx];
-  return !!(p.sourceId && p.runId);
+  return p ? !!(p.sourceId && p.runId) : false;
+}
+
+/* ── Dynamic Panel Management ── */
+function createVideoPanel(index) {
+  const panelDiv = document.createElement("div");
+  panelDiv.className = "video-panel";
+  panelDiv.id = `videoPanel${index}`;
+
+  panelDiv.innerHTML = `
+    <div class="video-header">
+      <div>
+        <h2>面板 ${index + 1} <span class="source-name" id="sourceName${index}"></span></h2>
+        <p class="video-meta" id="streamMeta${index}">等待输入视频源</p>
+      </div>
+      <div style="display:flex;align-items:center;gap:4px;">
+        <div class="live-indicator" id="liveIndicator${index}">
+          <span class="live-dot"></span>
+          LIVE
+        </div>
+        <button class="panel-close-btn" data-panel-idx="${index}" title="关闭面板">×</button>
+      </div>
+    </div>
+    <div class="video-container">
+      <video id="streamPlayer${index}" autoplay muted playsinline controls></video>
+      <img id="streamView${index}" alt="video stream" />
+      <div class="video-placeholder" id="streamPlaceholder${index}">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.25"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+        <p>等待视频源</p>
+      </div>
+    </div>
+    <div id="logBox${index}" class="log-box panel-log-box"></div>
+  `;
+
+  // Insert before the empty hint (or at end)
+  if (el.emptyStageHint && el.emptyStageHint.parentNode === el.videoStageGrid) {
+    el.videoStageGrid.insertBefore(panelDiv, el.emptyStageHint);
+  } else {
+    el.videoStageGrid.appendChild(panelDiv);
+  }
+
+  // Register DOM elements
+  el.panels[index] = {
+    panel: panelDiv,
+    streamPlayer: document.getElementById(`streamPlayer${index}`),
+    streamView: document.getElementById(`streamView${index}`),
+    streamPlaceholder: document.getElementById(`streamPlaceholder${index}`),
+    streamMeta: document.getElementById(`streamMeta${index}`),
+    liveIndicator: document.getElementById(`liveIndicator${index}`),
+    logBox: document.getElementById(`logBox${index}`),
+    sourceName: document.getElementById(`sourceName${index}`),
+  };
+
+  // Initialize state
+  state.panels[index] = {
+    sourceId: null,
+    runId: null,
+    sourceKind: "",
+    playbackUrl: "",
+    eventSource: null,
+    hls: null,
+    activeLogNode: null,
+    mjpegStallTimer: null,
+    mjpegLastNaturalWidth: 0,
+    mjpegStallNotified: false,
+    selectedPresets: new Set(),
+    customPrompt: "",
+  };
+
+  state.activePanelCount = index + 1;
+  updateGridCount();
+
+  // Close button handler
+  panelDiv.querySelector(".panel-close-btn").addEventListener("click", async (e) => {
+    e.stopPropagation();
+    await removeVideoPanel(index);
+  });
+
+  return index;
+}
+
+async function removeVideoPanel(index) {
+  const p = state.panels[index];
+  const pe = el.panels[index];
+  if (!p || !pe) return;
+
+  // Stop analysis for this panel
+  if (p.runId || p.eventSource) {
+    await stopAnalysisForPanel(index, true, false);
+  }
+
+  // Remove DOM
+  if (pe.panel && pe.panel.parentNode) {
+    pe.panel.parentNode.removeChild(pe.panel);
+  }
+
+  // Shift remaining panels down
+  for (let i = index; i < state.activePanelCount - 1; i++) {
+    state.panels[i] = state.panels[i + 1];
+    el.panels[i] = el.panels[i + 1];
+
+    // Update DOM IDs to match new indices
+    const panelEl = el.panels[i]?.panel;
+    if (panelEl) {
+      panelEl.id = `videoPanel${i}`;
+      const h2 = panelEl.querySelector(".video-header h2");
+      if (h2) {
+        const sourceName = panelEl.querySelector(".source-name");
+        const sourceText = sourceName ? sourceName.textContent : "";
+        h2.innerHTML = `面板 ${i + 1} <span class="source-name">${sourceText}</span>`;
+        el.panels[i].sourceName = h2.querySelector(".source-name");
+      }
+      const closeBtn = panelEl.querySelector(".panel-close-btn");
+      if (closeBtn) closeBtn.dataset.panelIdx = i;
+    }
+  }
+
+  state.activePanelCount--;
+  state.panels[state.activePanelCount] = null;
+  el.panels[state.activePanelCount] = null;
+
+  // Adjust configPanelIdx
+  if (state.configPanelIdx >= state.activePanelCount) {
+    state.configPanelIdx = Math.max(0, state.activePanelCount - 1);
+  }
+
+  updateGridCount();
+  updatePanelTabs();
+  updateButtonStates();
+}
+
+function updateGridCount() {
+  el.videoStageGrid.dataset.count = state.activePanelCount;
+  if (el.emptyStageHint) {
+    el.emptyStageHint.style.display = state.activePanelCount === 0 ? "flex" : "none";
+  }
 }
 
 function getNextAvailablePanel() {
-  if (!state.panels[0].sourceId) return 0;
-  if (!state.panels[1].sourceId) return 1;
+  // Find an empty panel first
+  for (let i = 0; i < state.activePanelCount; i++) {
+    if (!state.panels[i].sourceId) return i;
+  }
+  // Create a new panel if under max
+  if (state.activePanelCount < MAX_PANELS) {
+    return createVideoPanel(state.activePanelCount);
+  }
   return 0; // replace oldest
 }
 
@@ -428,7 +523,7 @@ function getTargetPanelsForFiles(fileCount) {
   const emptyPanels = [];
   const occupiedPanels = [];
 
-  for (let i = 0; i < PANEL_COUNT; i++) {
+  for (let i = 0; i < state.activePanelCount; i++) {
     if (state.panels[i].sourceId) {
       occupiedPanels.push(i);
     } else {
@@ -436,16 +531,19 @@ function getTargetPanelsForFiles(fileCount) {
     }
   }
 
-  return [...emptyPanels, ...occupiedPanels].slice(0, fileCount);
+  // Potentially create new panels
+  const available = [...emptyPanels, ...occupiedPanels];
+  while (available.length < fileCount && state.activePanelCount + (available.length - emptyPanels.length - occupiedPanels.length) < MAX_PANELS) {
+    const newIdx = createVideoPanel(state.activePanelCount);
+    available.push(newIdx);
+  }
+
+  return available.slice(0, fileCount);
 }
 
 function describeSelectedFiles(files) {
-  if (!files || files.length === 0) {
-    return "点击或拖拽一个或多个视频文件";
-  }
-  if (files.length === 1) {
-    return files[0].name;
-  }
+  if (!files || files.length === 0) return "点击或拖拽一个或多个视频文件";
+  if (files.length === 1) return files[0].name;
   return `已选择 ${files.length} 个文件`;
 }
 
@@ -460,61 +558,9 @@ function setUploadFeedback(text = "", visible = true) {
   el.uploadFeedback.classList.toggle("hidden", !visible || !text);
 }
 
-function ensureBootDomReady() {
-  const requiredKeys = [
-    "sourceTypeSeg",
-    "modeSeg",
-    "uploadPanel",
-    "urlPanel",
-    "localPanel",
-    "videoFile",
-    "uploadBtn",
-    "streamUrl",
-    "urlBtn",
-    "localPath",
-    "localBtn",
-    "targetRow",
-    "targetInput",
-    "startBtn",
-    "stopBtn",
-    "statusChip",
-    "statusText",
-    "promptArea",
-    "promptInput",
-    "applyPromptBtn",
-    "resetPromptBtn",
-    "presetPromptsGrid",
-    "insightTitle",
-    "modeTag",
-    "fileDrop",
-    "fileDropText",
-    "themeToggleBtn",
-  ];
-
-  const missing = [];
-  for (const key of requiredKeys) {
-    if (!el[key]) missing.push(key);
-  }
-
-  for (let i = 0; i < PANEL_COUNT; i++) {
-    const panel = el.panels[i];
-    if (!panel) {
-      missing.push(`panels[${i}]`);
-      continue;
-    }
-    for (const key of ["panel", "streamPlayer", "streamView", "streamPlaceholder", "streamMeta", "liveIndicator", "logBox", "sourceName"]) {
-      if (!panel[key]) missing.push(`panels[${i}].${key}`);
-    }
-  }
-
-  if (missing.length > 0) {
-    throw new Error(`页面缺少必要节点: ${missing.join(", ")}`);
-  }
-}
-
 function updateButtonStates() {
-  const anySource = state.panels.some(p => p.sourceId);
-  const anyRunning = state.panels.some(p => p.runId);
+  const anySource = state.panels.some(p => p && p.sourceId);
+  const anyRunning = state.panels.some(p => p && p.runId);
   el.startBtn.disabled = anyRunning || !anySource;
   el.stopBtn.disabled = !anyRunning;
 }
@@ -531,6 +577,7 @@ function bestEffortStopRun(sourceId, runId) {
 function resetPanelViewState(panelIdx) {
   const p = state.panels[panelIdx];
   const pe = el.panels[panelIdx];
+  if (!p || !pe) return;
 
   p.sourceId = null;
   p.runId = null;
@@ -551,13 +598,22 @@ function resetToInitialViewState() {
   state.mode = "infer";
   state.sourceType = "upload";
 
-  for (let i = 0; i < PANEL_COUNT; i++) {
-    resetPanelViewState(i);
-    addLog("欢迎使用 Video Intelligence Studio。请先接入视频源，然后点击「开始分析」。", i);
+  // Remove all panels
+  for (let i = state.activePanelCount - 1; i >= 0; i--) {
+    const pe = el.panels[i];
+    if (pe && pe.panel && pe.panel.parentNode) {
+      pe.panel.parentNode.removeChild(pe.panel);
+    }
+    state.panels[i] = null;
+    el.panels[i] = null;
   }
+  state.activePanelCount = 0;
+  state.configPanelIdx = 0;
+  updateGridCount();
 
   updateSourceTypeUI();
   updateModeUI();
+  updatePanelTabs();
 
   el.promptInput.value = state.defaultPrompt;
   el.targetInput.value = "";
@@ -575,6 +631,166 @@ function resetToInitialViewState() {
   setStatus("等待连接", false);
   el.startBtn.disabled = true;
   el.stopBtn.disabled = true;
+}
+
+/* ── Drawer Interaction ── */
+function setupDrawers() {
+  const OPEN_DELAY = 300;
+  const CLOSE_DELAY = 400;
+
+  function setupDrawer(triggerEl, drawerEl, side) {
+    function openDrawer() {
+      clearTimeout(state.drawerTimers[side]);
+      state.drawerTimers[side] = setTimeout(() => {
+        drawerEl.classList.add("open");
+      }, OPEN_DELAY);
+    }
+
+    function closeDrawer() {
+      clearTimeout(state.drawerTimers[side]);
+      state.drawerTimers[side] = setTimeout(() => {
+        drawerEl.classList.remove("open");
+      }, CLOSE_DELAY);
+    }
+
+    function cancelClose() {
+      clearTimeout(state.drawerTimers[side]);
+    }
+
+    triggerEl.addEventListener("mouseenter", openDrawer);
+    triggerEl.addEventListener("mouseleave", closeDrawer);
+
+    drawerEl.addEventListener("mouseenter", cancelClose);
+    drawerEl.addEventListener("mouseleave", closeDrawer);
+  }
+
+  setupDrawer(el.drawerTriggerLeft, el.drawerLeft, "left");
+  setupDrawer(el.drawerTriggerRight, el.drawerRight, "right");
+}
+
+/* ── Panel Tabs (right drawer) ── */
+function updatePanelTabs() {
+  if (!el.panelTabsBar) return;
+  el.panelTabsBar.innerHTML = "";
+
+  for (let i = 0; i < state.activePanelCount; i++) {
+    const btn = document.createElement("button");
+    btn.className = "panel-tab-btn" + (i === state.configPanelIdx ? " active" : "");
+    const sourceName = state.panels[i]?.sourceId
+      ? (el.panels[i]?.sourceName?.textContent || `面板 ${i + 1}`)
+      : `面板 ${i + 1}`;
+    btn.textContent = `面板 ${i + 1}`;
+    btn.dataset.panelIdx = i;
+    btn.addEventListener("click", () => switchConfigPanel(i));
+    el.panelTabsBar.appendChild(btn);
+
+    // Highlight the panel visually
+    if (el.panels[i]?.panel) {
+      el.panels[i].panel.classList.toggle("config-active", i === state.configPanelIdx);
+    }
+  }
+}
+
+function switchConfigPanel(idx) {
+  // Save current panel's config
+  savePanelConfig(state.configPanelIdx);
+
+  state.configPanelIdx = idx;
+
+  // Restore target panel's config
+  restorePanelConfig(idx);
+
+  // Update tabs visual
+  updatePanelTabs();
+  updateMixedDetectIndicator(idx);
+}
+
+function savePanelConfig(idx) {
+  const p = state.panels[idx];
+  if (!p) return;
+
+  // Save selected presets
+  p.selectedPresets = new Set();
+  el.presetPromptsGrid?.querySelectorAll(".preset-prompt-btn.active").forEach(btn => {
+    p.selectedPresets.add(btn.dataset.prompt);
+  });
+
+  // Save custom prompt
+  p.customPrompt = el.promptInput.value;
+}
+
+function restorePanelConfig(idx) {
+  const p = state.panels[idx];
+  if (!p) return;
+
+  // Restore presets
+  el.presetPromptsGrid?.querySelectorAll(".preset-prompt-btn").forEach(btn => {
+    btn.classList.toggle("active", p.selectedPresets.has(btn.dataset.prompt));
+  });
+
+  // Restore custom prompt
+  el.promptInput.value = p.customPrompt || "";
+
+  updateMixedDetectIndicator(idx);
+}
+
+/* ── Multi-Select Presets ── */
+function updateMixedDetectIndicator(panelIdx) {
+  const p = state.panels[panelIdx];
+  if (!p || !el.mixedDetectIndicator) return;
+
+  const selectedCount = p.selectedPresets.size;
+  if (selectedCount > 1) {
+    el.mixedDetectIndicator.classList.remove("hidden");
+    // Collect names
+    const names = [];
+    el.presetPromptsGrid?.querySelectorAll(".preset-prompt-btn.active").forEach(btn => {
+      names.push(btn.querySelector(".preset-text").textContent);
+    });
+    el.mixedDetectDesc.textContent = names.join(" + ");
+  } else {
+    el.mixedDetectIndicator.classList.add("hidden");
+  }
+}
+
+/* ── Prompt Building ── */
+function buildPanelPrompt(panelIdx) {
+  const p = state.panels[panelIdx];
+  if (!p) return state.defaultPrompt;
+
+  const presetPrompts = [];
+  if (p.selectedPresets.size > 0) {
+    el.presetPromptsGrid?.querySelectorAll(".preset-prompt-btn").forEach(btn => {
+      if (p.selectedPresets.has(btn.dataset.prompt)) {
+        presetPrompts.push(btn.dataset.prompt);
+      }
+    });
+  }
+
+  const custom = p.customPrompt?.trim() || "";
+
+  if (presetPrompts.length === 0 && !custom) {
+    return state.defaultPrompt;
+  }
+
+  if (presetPrompts.length === 1 && !custom) {
+    return presetPrompts[0];
+  }
+
+  // Multiple presets / mixed mode
+  const parts = [];
+  presetPrompts.forEach((prompt, i) => {
+    parts.push(`${i + 1}. ${prompt}`);
+  });
+  if (custom) {
+    parts.push(`${parts.length + 1}. ${custom}`);
+  }
+
+  if (parts.length > 1) {
+    return "请依次检测以下场景：\n" + parts.join("\n");
+  }
+
+  return custom || state.defaultPrompt;
 }
 
 /* ── UI State ── */
@@ -602,6 +818,7 @@ function updateModeUI() {
 async function stopAnalysisForPanel(panelIdx, notifyBackend = true, waitBackendStop = false) {
   const p = state.panels[panelIdx];
   const pe = el.panels[panelIdx];
+  if (!p || !pe) return;
   const sourceId = p.sourceId;
   const runId = p.runId;
 
@@ -645,13 +862,12 @@ async function stopAnalysis(
   }
 
   if (resetToInitial) {
-    // Stop all panels first, then reset
-    for (let i = 0; i < PANEL_COUNT; i++) {
+    for (let i = 0; i < state.activePanelCount; i++) {
       await stopAnalysisForPanel(i, notifyBackend, waitBackendStop);
     }
     resetToInitialViewState();
   } else {
-    for (let i = 0; i < PANEL_COUNT; i++) {
+    for (let i = 0; i < state.activePanelCount; i++) {
       await stopAnalysisForPanel(i, notifyBackend, waitBackendStop);
     }
     setStatus("已停止", false);
@@ -662,10 +878,8 @@ async function stopAnalysis(
 async function startPanelStream(panelIdx, actionToken, mode) {
   const p = state.panels[panelIdx];
   const pe = el.panels[panelIdx];
+  if (!p || !pe || !p.sourceId) return;
 
-  if (!p.sourceId) return;
-
-  // Stop existing run for this panel if any (fire-and-forget to backend)
   if (p.runId || p.eventSource) {
     await stopAnalysisForPanel(panelIdx, true, false);
   }
@@ -719,9 +933,8 @@ async function startPanelStream(panelIdx, actionToken, mode) {
     : "VLM-Detect 正在实时检测";
 
   if (mode === "infer") {
-    // Get the active preset prompt or use custom input
-    const activePresetBtn = el.presetPromptsGrid?.querySelector(".preset-prompt-btn.active");
-    const promptText = activePresetBtn ? activePresetBtn.dataset.prompt : (el.promptInput.value.trim() || state.defaultPrompt);
+    // Use per-panel prompt
+    const promptText = buildPanelPrompt(panelIdx);
     const prompt = encodeURIComponent(promptText);
     function makeInferSSE() {
       return new EventSource(
@@ -822,8 +1035,11 @@ async function startAllStreams() {
   const mode = state.mode;
   const activePanels = [];
 
-  for (let i = 0; i < PANEL_COUNT; i++) {
-    if (state.panels[i].sourceId) {
+  // Save config for the currently-viewed panel before starting
+  savePanelConfig(state.configPanelIdx);
+
+  for (let i = 0; i < state.activePanelCount; i++) {
+    if (state.panels[i] && state.panels[i].sourceId) {
       activePanels.push(i);
     }
   }
@@ -834,10 +1050,8 @@ async function startAllStreams() {
     return;
   }
 
-  // Stop any currently running panels first (don't wait for backend – the new
-  // _start_run on the server will overwrite the old run for the same source).
-  for (let i = 0; i < PANEL_COUNT; i++) {
-    if (state.panels[i].runId || state.panels[i].eventSource) {
+  for (let i = 0; i < state.activePanelCount; i++) {
+    if (state.panels[i] && (state.panels[i].runId || state.panels[i].eventSource)) {
       await stopAnalysisForPanel(i, true, false);
     }
   }
@@ -854,7 +1068,7 @@ async function startAllStreams() {
 
   if (!isActionActive(actionToken)) return;
   updateButtonStates();
-  if (state.panels.some(p => p.runId)) {
+  if (state.panels.some(p => p && p.runId)) {
     setStatus("分析中", true);
   }
   releaseAction(actionToken);
@@ -899,6 +1113,7 @@ async function uploadChunkWithRetry(url, formData, maxRetries = 3, signal = null
 async function uploadSingleVideoToPanel(file, panelIdx, actionToken, fileIndex, totalFiles) {
   const p = state.panels[panelIdx];
   const pe = el.panels[panelIdx];
+  if (!p || !pe) return;
   const CHUNK_SIZE = 2 * 1024 * 1024;
   let watchdog = null;
   let abortController = null;
@@ -928,7 +1143,7 @@ async function uploadSingleVideoToPanel(file, panelIdx, actionToken, fileIndex, 
       }
     }, 2000);
 
-    // Step 1: Init upload session
+    // Step 1: Init
     setStatus(`初始化上传 ${fileIndex + 1}/${totalFiles}...`, false);
     el.uploadBtn.textContent = totalFiles > 1 ? `初始化 ${fileIndex + 1}/${totalFiles}` : "初始化...";
     setUploadFeedback(`初始化上传 ${fileIndex + 1}/${totalFiles}\n${file.name}`);
@@ -974,7 +1189,7 @@ async function uploadSingleVideoToPanel(file, panelIdx, actionToken, fileIndex, 
     }
     const uploadId = initData.upload_id;
 
-    // Step 2: Upload chunks with progress
+    // Step 2: Upload chunks
     let uploadedChunks = 0;
     const CONCURRENCY = 2;
     let nextChunk = 0;
@@ -1028,7 +1243,7 @@ async function uploadSingleVideoToPanel(file, panelIdx, actionToken, fileIndex, 
       throw new Error(`${errors.length} 个分片上传失败，请重试`);
     }
 
-    // Step 3: Complete / merge
+    // Step 3: Complete
     el.uploadBtn.textContent = totalFiles > 1 ? `合并 ${fileIndex + 1}/${totalFiles}` : "合并中...";
     setStatus(`合并文件 ${fileIndex + 1}/${totalFiles}...`, false);
     setUploadFeedback(`合并文件 ${fileIndex + 1}/${totalFiles}\n${file.name}`);
@@ -1069,6 +1284,7 @@ async function uploadSingleVideoToPanel(file, panelIdx, actionToken, fileIndex, 
     addLog(`✓ 已加载: ${data.name} (${data.size_mb}MB)`, panelIdx);
     setUploadFeedback(`已完成 ${fileIndex + 1}/${totalFiles}\n${data.name} (${data.size_mb}MB)`);
     updateButtonStates();
+    updatePanelTabs();
     return data;
   } finally {
     if (watchdog) {
@@ -1084,26 +1300,27 @@ async function uploadSingleVideoToPanel(file, panelIdx, actionToken, fileIndex, 
 
 async function uploadVideo() {
   const actionToken = claimAction("upload");
-  const panelIdx = getNextAvailablePanel();
   const files = Array.from(el.videoFile.files || []);
 
   if (files.length === 0) {
     setUploadFeedback("还没有选择文件", true);
+    const panelIdx = state.activePanelCount > 0 ? 0 : createVideoPanel(0);
     addLog("⚠ 请先选择视频文件", panelIdx);
     releaseAction(actionToken);
     return;
   }
 
-  const selectedFiles = files.slice(0, PANEL_COUNT);
+  const selectedFiles = files.slice(0, MAX_PANELS);
   const targetPanels = getTargetPanelsForFiles(selectedFiles.length);
   setUploadFeedback(
     `已选择 ${selectedFiles.length} 个文件，准备上传\n${selectedFiles.map((file) => file.name).join("\n")}`
   );
 
-  if (files.length > PANEL_COUNT) {
+  if (files.length > MAX_PANELS) {
+    const logPanel = targetPanels[0] ?? 0;
     addLog(
-      `⚠ 当前最多同时加载 ${PANEL_COUNT} 个视频，已使用前 ${selectedFiles.length} 个文件`,
-      targetPanels[0] ?? 0,
+      `⚠ 当前最多同时加载 ${MAX_PANELS} 个视频，已使用前 ${selectedFiles.length} 个文件`,
+      logPanel,
       true
     );
   }
@@ -1204,6 +1421,7 @@ async function registerUrl() {
     setStatus("流地址已就绪", true);
     addLog(`✓ 已接入: ${url}`, panelIdx);
     updateButtonStates();
+    updatePanelTabs();
     el.startBtn.classList.add("pulse-ready");
     setTimeout(() => el.startBtn.classList.remove("pulse-ready"), 2000);
   } finally {
@@ -1249,6 +1467,7 @@ async function loadLocalFile() {
     setStatus("视频已就绪", true);
     addLog(`✓ 已加载服务器文件: ${data.name}`, panelIdx);
     updateButtonStates();
+    updatePanelTabs();
     el.startBtn.classList.add("pulse-ready");
     setTimeout(() => el.startBtn.classList.remove("pulse-ready"), 2000);
   } finally {
@@ -1259,8 +1478,6 @@ async function loadLocalFile() {
 
 /* ── Boot ── */
 async function boot() {
-  ensureBootDomReady();
-
   try {
     const data = await fetchJson("/api/defaults");
     state.defaultPrompt = data.default_prompt || "请简单描述一下这个视频";
@@ -1283,42 +1500,45 @@ async function boot() {
   updateSelectedFilesLabel([]);
   setUploadFeedback("", false);
 
-  for (let i = 0; i < PANEL_COUNT; i++) {
-    addLog("欢迎使用 Video Intelligence Studio。请先接入视频源，然后点击「开始分析」。", i);
-  }
+  // Start with 0 panels — empty stage
+  updateGridCount();
+  updatePanelTabs();
+
+  // Setup drawer behavior
+  setupDrawers();
 }
 
 /* ── Event Listeners ── */
 el.sourceTypeSeg.addEventListener("click", async (e) => {
   const btn = e.target.closest("button[data-source-type]");
   if (!btn) return;
-  if (state.panels.some(p => p.runId)) {
+  if (state.panels.some(p => p && p.runId)) {
     await stopAnalysis(true, false, true, true);
   }
   state.sourceType = btn.dataset.sourceType;
   updateSourceTypeUI();
 });
 
-// Preset prompt buttons
+// Preset prompt buttons — multi-select toggle
 if (el.presetPromptsGrid) {
   el.presetPromptsGrid.addEventListener("click", (e) => {
     const btn = e.target.closest(".preset-prompt-btn");
     if (!btn) return;
 
-    // Visual feedback - toggle active state
-    const wasActive = btn.classList.contains("active");
-    el.presetPromptsGrid.querySelectorAll(".preset-prompt-btn").forEach(b => {
-      b.classList.remove("active");
-    });
+    // Toggle this button
+    btn.classList.toggle("active");
 
-    if (!wasActive) {
-      btn.classList.add("active");
+    // Update panel state
+    const p = state.panels[state.configPanelIdx];
+    if (p) {
+      if (btn.classList.contains("active")) {
+        p.selectedPresets.add(btn.dataset.prompt);
+      } else {
+        p.selectedPresets.delete(btn.dataset.prompt);
+      }
     }
 
-    // Clear custom prompt input when selecting preset
-    if (!wasActive) {
-      el.promptInput.value = "";
-    }
+    updateMixedDetectIndicator(state.configPanelIdx);
   });
 }
 
@@ -1326,12 +1546,12 @@ el.modeSeg.addEventListener("click", async (e) => {
   const btn = e.target.closest("button[data-mode]");
   if (!btn) return;
 
-  if (state.panels.some(p => p.runId)) {
+  if (state.panels.some(p => p && p.runId)) {
     await stopAnalysis(true, false, true, true);
   }
   state.mode = btn.dataset.mode;
   updateModeUI();
-  for (let i = 0; i < PANEL_COUNT; i++) {
+  for (let i = 0; i < state.activePanelCount; i++) {
     clearLogs(i);
   }
   updateButtonStates();
@@ -1342,19 +1562,28 @@ el.uploadBtn.addEventListener("click", async () => {
   try { await uploadVideo(); }
   catch (err) {
     setUploadFeedback(`上传失败\n${err?.message || String(err)}`, true);
-    addLog(`❌ 上传失败: ${err.message}`, 0, true);
+    const logPanel = state.activePanelCount > 0 ? 0 : 0;
+    if (state.activePanelCount > 0) {
+      addLog(`❌ 上传失败: ${err.message}`, 0, true);
+    }
     setStatus("上传失败", false);
   }
 });
 
 el.urlBtn.addEventListener("click", async () => {
   try { await registerUrl(); }
-  catch (err) { addLog(`❌ 连接失败: ${err.message}`, 0, true); setStatus("连接失败", false); }
+  catch (err) {
+    if (state.activePanelCount > 0) addLog(`❌ 连接失败: ${err.message}`, 0, true);
+    setStatus("连接失败", false);
+  }
 });
 
 el.localBtn.addEventListener("click", async () => {
   try { await loadLocalFile(); }
-  catch (err) { addLog(`❌ 加载失败: ${err.message}`, 0, true); setStatus("加载失败", false); }
+  catch (err) {
+    if (state.activePanelCount > 0) addLog(`❌ 加载失败: ${err.message}`, 0, true);
+    setStatus("加载失败", false);
+  }
 });
 
 el.startBtn.addEventListener("click", async () => {
@@ -1364,7 +1593,7 @@ el.startBtn.addEventListener("click", async () => {
   try {
     await startAllStreams();
   } catch (err) {
-    addLog(`❌ 启动失败: ${err.message}`, 0, true);
+    if (state.activePanelCount > 0) addLog(`❌ 启动失败: ${err.message}`, 0, true);
     setStatus("启动失败", false);
   } finally {
     el.startBtn.textContent = origText;
@@ -1374,8 +1603,8 @@ el.startBtn.addEventListener("click", async () => {
 
 el.stopBtn.addEventListener("click", async () => {
   await stopAnalysis(true, false);
-  for (let i = 0; i < PANEL_COUNT; i++) {
-    if (state.panels[i].sourceId) {
+  for (let i = 0; i < state.activePanelCount; i++) {
+    if (state.panels[i] && state.panels[i].sourceId) {
       addLog("■ 分析已停止，可重新点击「开始分析」继续", i);
     }
   }
@@ -1383,32 +1612,20 @@ el.stopBtn.addEventListener("click", async () => {
 
 el.applyPromptBtn.addEventListener("click", async () => {
   if (state.mode !== "infer") return;
-  if (!state.panels.some(p => p.sourceId)) {
-    addLog("⚠ 请先接入视频源", 0, true);
+  if (!state.panels.some(p => p && p.sourceId)) {
+    if (state.activePanelCount > 0) addLog("⚠ 请先接入视频源", 0, true);
     return;
   }
 
-  // Get the active preset or use custom input
-  const activePresetBtn = el.presetPromptsGrid?.querySelector(".preset-prompt-btn.active");
-  const promptToUse = activePresetBtn ? activePresetBtn.dataset.prompt : el.promptInput.value.trim();
+  // Save current config before starting
+  savePanelConfig(state.configPanelIdx);
 
-  if (!promptToUse) {
-    addLog("⚠ 请选择检测类型或输入自定义指令", 0, true);
-    return;
-  }
-
-  // Don't show the preset content in the input box
-  // Only show custom input if user typed it
-  if (!activePresetBtn) {
-    el.promptInput.value = promptToUse;
-  } else {
-    el.promptInput.value = "";
-  }
-
-  for (let i = 0; i < PANEL_COUNT; i++) {
-    if (state.panels[i].sourceId) {
-      const presetName = activePresetBtn ? activePresetBtn.querySelector(".preset-text").textContent : "自定义";
-      addLog(`→ 已应用检测类型: ${presetName}，重新开始流式推理...`, i, true);
+  for (let i = 0; i < state.activePanelCount; i++) {
+    if (state.panels[i] && state.panels[i].sourceId) {
+      const prompt = buildPanelPrompt(i);
+      const presetCount = state.panels[i].selectedPresets.size;
+      const label = presetCount > 1 ? "混合检测" : (presetCount === 1 ? "预设检测" : "自定义");
+      addLog(`→ 面板 ${i + 1}: 已应用 ${label}，重新开始流式推理...`, i, true);
     }
   }
   await startAllStreams();
@@ -1416,8 +1633,18 @@ el.applyPromptBtn.addEventListener("click", async () => {
 
 el.resetPromptBtn.addEventListener("click", () => {
   el.promptInput.value = state.defaultPrompt;
-  for (let i = 0; i < PANEL_COUNT; i++) {
-    if (state.panels[i].sourceId) {
+  // Clear presets for current panel
+  el.presetPromptsGrid?.querySelectorAll(".preset-prompt-btn").forEach(b => {
+    b.classList.remove("active");
+  });
+  const p = state.panels[state.configPanelIdx];
+  if (p) {
+    p.selectedPresets.clear();
+    p.customPrompt = state.defaultPrompt;
+  }
+  updateMixedDetectIndicator(state.configPanelIdx);
+  for (let i = 0; i < state.activePanelCount; i++) {
+    if (state.panels[i] && state.panels[i].sourceId) {
       addLog("→ 已恢复默认指令", i, true);
     }
   }
@@ -1458,8 +1685,9 @@ el.videoFile.addEventListener("change", () => {
 });
 
 window.addEventListener("beforeunload", () => {
-  for (let i = 0; i < PANEL_COUNT; i++) {
+  for (let i = 0; i < state.activePanelCount; i++) {
     const p = state.panels[i];
+    if (!p) continue;
     if (p.eventSource) p.eventSource.close();
     stopNativePlayback(i);
     if (p.sourceId && p.runId) {
@@ -1481,6 +1709,5 @@ window.addEventListener("beforeunload", () => {
 boot().catch((err) => {
   console.error("boot failed:", err);
   setUploadFeedback(`初始化失败\n${err?.message || String(err)}`, true);
-  addLog(`❌ 初始化失败: ${err.message}`, 0, true);
   setStatus("初始化失败", false);
 });

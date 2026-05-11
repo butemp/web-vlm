@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/style.css?v=20260423-1" />
+  <link rel="stylesheet" href="/static/style.css?v=20260511-1" />
 </head>
 <body>
   <div class="bg-blob bg-blob-1"></div>
@@ -35,9 +35,15 @@
       </div>
     </header>
 
-    <main class="main-grid">
-      <!-- Left Panel -->
-      <aside class="panel panel-controls">
+    <main class="stage-container">
+      <!-- Left Drawer Trigger -->
+      <div class="drawer-trigger drawer-trigger-left" id="drawerTriggerLeft"></div>
+
+      <!-- Left Drawer: Input Sources & Controls -->
+      <aside class="drawer drawer-left" id="drawerLeft">
+        <div class="drawer-handle drawer-handle-left">
+          <span></span>
+        </div>
         <div class="panel-inner">
           <section class="ctrl-section">
             <div class="section-header">
@@ -96,56 +102,25 @@
         </div>
       </aside>
 
-      <!-- Center: Video Panels -->
-      <section class="panel panel-video-wrapper">
-        <div class="video-panels-container">
-          <div class="video-panel" id="videoPanel0">
-            <div class="video-header">
-              <div>
-                <h2>面板 1 <span class="source-name" id="sourceName0"></span></h2>
-                <p class="video-meta" id="streamMeta0">等待输入视频源</p>
-              </div>
-              <div class="live-indicator" id="liveIndicator0">
-                <span class="live-dot"></span>
-                LIVE
-              </div>
-            </div>
-            <div class="video-container">
-              <video id="streamPlayer0" autoplay muted playsinline controls></video>
-              <img id="streamView0" alt="video stream" />
-              <div class="video-placeholder" id="streamPlaceholder0">
-                <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.25"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
-                <p>上传视频或输入流媒体地址以开始</p>
-              </div>
-            </div>
-            <div id="logBox0" class="log-box panel-log-box"></div>
-          </div>
-          <div class="video-panel" id="videoPanel1">
-            <div class="video-header">
-              <div>
-                <h2>面板 2 <span class="source-name" id="sourceName1"></span></h2>
-                <p class="video-meta" id="streamMeta1">等待输入视频源</p>
-              </div>
-              <div class="live-indicator" id="liveIndicator1">
-                <span class="live-dot"></span>
-                LIVE
-              </div>
-            </div>
-            <div class="video-container">
-              <video id="streamPlayer1" autoplay muted playsinline controls></video>
-              <img id="streamView1" alt="video stream" />
-              <div class="video-placeholder" id="streamPlaceholder1">
-                <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.25"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
-                <p>上传视频或输入流媒体地址以开始</p>
-              </div>
-            </div>
-            <div id="logBox1" class="log-box panel-log-box"></div>
+      <!-- Center: Dynamic Video Stage -->
+      <section class="video-stage">
+        <div id="videoStageGrid" class="video-stage-grid" data-count="0">
+          <div class="empty-stage-hint" id="emptyStageHint">
+            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.25"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+            <p>从左侧添加视频源</p>
+            <span class="file-drop-hint">将鼠标移至屏幕左侧边缘打开控制面板</span>
           </div>
         </div>
       </section>
 
-      <!-- Right Panel -->
-      <aside class="panel panel-output">
+      <!-- Right Drawer Trigger -->
+      <div class="drawer-trigger drawer-trigger-right" id="drawerTriggerRight"></div>
+
+      <!-- Right Drawer: Detection Config & Output -->
+      <aside class="drawer drawer-right" id="drawerRight">
+        <div class="drawer-handle drawer-handle-right">
+          <span></span>
+        </div>
         <div class="output-header">
           <div>
             <h2 id="insightTitle">推理输出</h2>
@@ -153,6 +128,16 @@
           </div>
           <span class="model-tag" id="modeTag">VLM-Online</span>
         </div>
+
+        <!-- Panel Tabs Bar -->
+        <div id="panelTabsBar" class="panel-tabs-bar"></div>
+
+        <!-- Mixed Detection Indicator -->
+        <div id="mixedDetectIndicator" class="mixed-detect-indicator hidden">
+          <span class="mixed-badge">混合检测</span>
+          <span class="mixed-desc" id="mixedDetectDesc"></span>
+        </div>
+
         <div id="promptArea" class="prompt-section">
           <label class="label">在线视频检测</label>
           <div class="preset-prompts-grid" id="presetPromptsGrid">
@@ -182,11 +167,27 @@
             </button>
             <button class="preset-prompt-btn" data-prompt="请简单描述一下这个视频的内容和主要场景。">
               <span class="preset-icon">📹</span>
-              <span class="preset-text">通用描述</span>
+              <span class="preset-text">场景描述</span>
             </button>
             <button class="preset-prompt-btn" data-prompt="视频中是否有可疑人员或异常行为？请详细说明。">
               <span class="preset-icon">🔍</span>
               <span class="preset-text">异常行为</span>
+            </button>
+            <button class="preset-prompt-btn" data-prompt="视频中是否发生了车辆碰撞、追尾或其他交通事故？请描述事故情况。">
+              <span class="preset-icon">🚗</span>
+              <span class="preset-text">车辆事故</span>
+            </button>
+            <button class="preset-prompt-btn" data-prompt="视频中工地人员是否存在未戴安全帽、未穿反光衣或违规操作等行为？">
+              <span class="preset-icon">🏗️</span>
+              <span class="preset-text">工地违规</span>
+            </button>
+            <button class="preset-prompt-btn" data-prompt="视频中是否有被遗留的物品（如包裹、箱子等），可能存在安全隐患？">
+              <span class="preset-icon">🎒</span>
+              <span class="preset-text">物品遗留</span>
+            </button>
+            <button class="preset-prompt-btn" data-prompt="视频中是否有人非法入侵受限区域，如翻越围墙、闯入禁区等？">
+              <span class="preset-icon">🚧</span>
+              <span class="preset-text">非法入侵</span>
             </button>
           </div>
           <label class="label" style="margin-top: 10px;" for="promptInput">自定义指令</label>
@@ -199,7 +200,7 @@
       </aside>
     </main>
   </div>
-  <script src="/static/app.js?v=20260422-2"></script>
+  <script src="/static/app.js?v=20260511-1"></script>
   <script async src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15"></script>
 </body>
 </html>
