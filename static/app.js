@@ -156,7 +156,7 @@ function startMjpegStallDetection(panelIdx) {
       unchangedTicks = 0;
     }
     p.mjpegLastNaturalWidth = w;
-    if (unchangedTicks >= 8 && !p.mjpegStallNotified) {
+    if (unchangedTicks >= 20 && !p.mjpegStallNotified) {
       p.mjpegStallNotified = true;
       addLog("⚠ 视频流可能已中断（画面长时间未更新），建议重新点击「开始分析」", panelIdx, true);
       setStatus("视频流可能已中断", false);
