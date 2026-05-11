@@ -865,9 +865,13 @@ def _draw_detections(frame: np.ndarray, detections: List[Dict[str, object]]) -> 
 # Routes
 # ---------------------------------------------------------------------------
 @app.get("/", response_class=HTMLResponse)
-async def index() -> FileResponse:
-    return FileResponse(
-        STATIC_DIR / "index.html",
+async def index() -> HTMLResponse:
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    # Inject a dynamic cache-busting timestamp so browsers never use stale JS/CSS
+    _ts = str(int(time.time()))
+    html = html.replace("__CACHE_BUST__", _ts)
+    return HTMLResponse(
+        content=html,
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",
             "Pragma": "no-cache",

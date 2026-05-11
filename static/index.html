@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/style.css?v=20260511-3" />
+  <link rel="stylesheet" href="/static/style.css?v=__CACHE_BUST__" />
 </head>
 <body>
   <div class="bg-blob bg-blob-1"></div>
@@ -38,7 +38,8 @@
     <main class="stage-container">
       <!-- Left Drawer Trigger -->
       <div class="drawer-trigger drawer-trigger-left" id="drawerTriggerLeft">
-        <button class="drawer-tab drawer-tab-left" id="drawerTabLeft" title="控制面板">
+        <button class="drawer-tab drawer-tab-left" id="drawerTabLeft" title="控制面板"
+          onclick="document.getElementById('drawerLeft').classList.toggle('open');this.classList.toggle('active')">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
         </button>
       </div>
@@ -120,7 +121,8 @@
 
       <!-- Right Drawer Trigger -->
       <div class="drawer-trigger drawer-trigger-right" id="drawerTriggerRight">
-        <button class="drawer-tab drawer-tab-right" id="drawerTabRight" title="检测配置">
+        <button class="drawer-tab drawer-tab-right" id="drawerTabRight" title="检测配置"
+          onclick="document.getElementById('drawerRight').classList.toggle('open');this.classList.toggle('active')">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
         </button>
       </div>
@@ -209,7 +211,7 @@
       </aside>
     </main>
   </div>
-  <script src="/static/app.js?v=20260511-3"></script>
+  <script src="/static/app.js?v=__CACHE_BUST__"></script>
   <script async src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15"></script>
 </body>
 </html>
