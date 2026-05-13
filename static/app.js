@@ -732,45 +732,40 @@ function buildPanelPrompt(panelIdx) {
   const p = state.panels[panelIdx];
   if (!p) return state.defaultPrompt;
 
-  // Collect selected preset short names and prompts
-  const presetNames = [];
+  // Collect selected preset short names and prompts. "场景描述" is treated as
+  // the mandatory first step, not as an anomaly category to detect.
+  const selectedPresets = [];
+  const sceneDescriptionNames = new Set(["场景描述"]);
   if (p.selectedPresets.size > 0) {
     el.presetPromptsGrid?.querySelectorAll(".preset-prompt-btn").forEach(btn => {
       if (p.selectedPresets.has(btn.dataset.prompt)) {
-        presetNames.push(btn.querySelector(".preset-text").textContent);
+        selectedPresets.push({
+          name: btn.querySelector(".preset-text").textContent,
+          prompt: btn.dataset.prompt,
+        });
       }
     });
   }
 
   const custom = p.customPrompt?.trim() || "";
+  const detectionNames = selectedPresets
+    .map(item => item.name)
+    .filter(name => !sceneDescriptionNames.has(name));
 
-  if (presetNames.length === 0 && !custom) {
+  if (detectionNames.length === 0 && !custom) {
     return state.defaultPrompt;
   }
 
   const NO_ANOMALY_SUFFIX = '如未发现异常请简要回复"无明显异常"。';
-  const isSceneDesc = presetNames.includes("场景描述");
 
-  // Single preset, no custom
-  if (presetNames.length === 1 && !custom) {
-    for (const prompt of p.selectedPresets) {
-      return isSceneDesc ? prompt : prompt + NO_ANOMALY_SUFFIX;
-    }
+  if (detectionNames.length === 0 && custom) {
+    return `请先简单描述视频内容，然后重点关注以下要求：${custom}。`;
   }
 
-  // Multiple presets or preset + custom: merge into one sentence
-  const allParts = [...presetNames];
+  const allParts = [...detectionNames];
   if (custom) allParts.push(custom);
 
-  if (isSceneDesc && presetNames.length === 1) {
-    // Scene description + custom
-    return `请简单描述视频内容，并关注以下方面：${custom}`;
-  }
-
-  const suffix = isSceneDesc
-    ? '请简单描述视频内容，并对检测项如有发现请详细描述。'
-    : `如有发现请详细描述，${NO_ANOMALY_SUFFIX}`;
-  return `请检测视频中是否存在以下情况：${allParts.join("、")}。${suffix}`;
+  return `请先简单描述视频内容，然后检测视频中是否存在以下情况：${allParts.join("、")}。如有发现请详细描述，${NO_ANOMALY_SUFFIX}`;
 }
 
 /* ── UI State ── */
