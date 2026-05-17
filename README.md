@@ -86,3 +86,22 @@ http://127.0.0.1:8000
 - `GET /api/stream/{source_id}?run_id=...&mode=infer|detect&targets=...`：视频 MJPEG 流
 - `GET /api/infer/stream?source_id=...&run_id=...&prompt=...`：推理 SSE 流式输出
 - `GET /api/detect/stream?source_id=...&run_id=...&targets=...`：检测 SSE 事件流
+
+## 单帧总结 API
+
+不影响 Web 端会话的轻量接口：传入摄像头/流媒体地址，服务端抓取当前一帧并返回画面总结。
+
+```bash
+curl "http://127.0.0.1:8000/summary?addr=rtsp://example/stream"
+```
+
+返回示例：
+
+```json
+{
+  "summary": "画面中是一段道路监控场景，有车辆正在通行，未见明显异常。",
+  "cost_ms": 1280.5
+}
+```
+
+如果流地址本身包含 `?`、`&` 等字符，请先对 `addr` 做 URL 编码。

@@ -58,6 +58,7 @@ UPLOAD_DIR = BASE_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 DEFAULT_PROMPT = "请简单描述一下这个视频"
+SUMMARY_PROMPT = "请用一两句话简单总结当前摄像头画面的主要内容。"
 MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500 MB
 MAX_CONCURRENT_RUNS = 4
 
@@ -204,12 +205,7 @@ SOURCES: Dict[str, Dict[str, str]] = {}
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _open_capture(source_id: str) -> cv2.VideoCapture:
-    source = SOURCES.get(source_id)
-    if not source:
-        raise ValueError("source_id not found")
-    value = source["value"]
-
+def _open_capture_value(value: str) -> tuple[cv2.VideoCapture, float, bool]:
     ffmpeg_options = _build_ffmpeg_capture_options(value)
 
     with _ffmpeg_env_lock:
@@ -236,12 +232,22 @@ def _open_capture(source_id: str) -> cv2.VideoCapture:
     except Exception:
         cap.release()
         raise
+    return cap, time.monotonic() - open_t0, bool(ffmpeg_options)
+
+
+def _open_capture(source_id: str) -> cv2.VideoCapture:
+    source = SOURCES.get(source_id)
+    if not source:
+        raise ValueError("source_id not found")
+    value = source["value"]
+
+    cap, open_cost, has_ffmpeg_options = _open_capture_value(value)
     logger.info(
         "视频源打开成功 source=%s kind=%s open_cost=%.2fs ffmpeg_opts=%s",
         _short_id(source_id),
         source.get("kind", "unknown"),
-        time.monotonic() - open_t0,
-        "on" if ffmpeg_options else "off",
+        open_cost,
+        "on" if has_ffmpeg_options else "off",
     )
     return cap
 
@@ -693,7 +699,12 @@ class _RunStopCriteria(_RunStopBase):
         return not _is_run_active(self.source_id, self.run_id)
 
 
-def _qwen_caption(frame: np.ndarray, prompt: str, source_id: str, run_id: str) -> str:
+def _qwen_caption(
+    frame: np.ndarray,
+    prompt: str,
+    source_id: str = "",
+    run_id: str = "",
+) -> str:
     model, processor = _ensure_qwen_loaded()
     frame = _resize_for_vlm(frame)
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -719,15 +730,17 @@ def _qwen_caption(frame: np.ndarray, prompt: str, source_id: str, run_id: str) -
         )
         model_inputs = model_inputs.to(model.device)
 
-        with torch.inference_mode():
-            generated_ids = model.generate(
-                **model_inputs,
-                max_new_tokens=QWEN_MAX_NEW_TOKENS,
-                do_sample=False,
-                stopping_criteria=StoppingCriteriaList(
-                    [_RunStopCriteria(source_id, run_id)]
-                ),
+        generate_kwargs = {
+            "max_new_tokens": QWEN_MAX_NEW_TOKENS,
+            "do_sample": False,
+        }
+        if source_id and run_id:
+            generate_kwargs["stopping_criteria"] = StoppingCriteriaList(
+                [_RunStopCriteria(source_id, run_id)]
             )
+
+        with torch.inference_mode():
+            generated_ids = model.generate(**model_inputs, **generate_kwargs)
 
     input_ids = model_inputs["input_ids"]
     generated_trimmed = [
@@ -740,6 +753,42 @@ def _qwen_caption(frame: np.ndarray, prompt: str, source_id: str, run_id: str) -
         clean_up_tokenization_spaces=False,
     )[0].strip()
     return text or "未生成有效文本。"
+
+
+def _capture_summary_frame(addr: str) -> np.ndarray:
+    cap = None
+    try:
+        cap, open_cost, has_ffmpeg_options = _open_capture_value(addr)
+        logger.info(
+            "summary 视频源打开成功 open_cost=%.2fs ffmpeg_opts=%s addr=%s",
+            open_cost,
+            "on" if has_ffmpeg_options else "off",
+            addr,
+        )
+
+        # Drain a few frames from buffered live sources so the summary is closer
+        # to the current camera view without keeping the HTTP caller waiting long.
+        for _ in range(3):
+            try:
+                if not cap.grab():
+                    break
+            except Exception:
+                break
+
+        last_frame = None
+        for _ in range(8):
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                last_frame = frame
+                break
+            time.sleep(0.03)
+
+        if last_frame is None:
+            raise ValueError("无法从视频源读取有效画面")
+        return last_frame
+    finally:
+        if cap is not None:
+            cap.release()
 
 
 def _extract_yolo_name(names: object, cls_id: int) -> str:
@@ -883,6 +932,50 @@ async def index() -> HTMLResponse:
 @app.get("/api/defaults")
 async def defaults() -> JSONResponse:
     return JSONResponse({"default_prompt": DEFAULT_PROMPT})
+
+
+@app.get("/summary")
+async def summary(
+    addr: str = Query(..., description="摄像头或视频流地址，如 rtsp/http/hls"),
+    prompt: str = Query(SUMMARY_PROMPT, description="可选的单帧总结指令"),
+) -> JSONResponse:
+    """Capture one frame from a stream URL and return a VLM summary."""
+
+    addr = (addr or "").strip()
+    prompt = (prompt or SUMMARY_PROMPT).strip() or SUMMARY_PROMPT
+    if not addr:
+        raise HTTPException(status_code=400, detail="addr 不能为空")
+
+    request_t0 = time.monotonic()
+    loop = asyncio.get_event_loop()
+    try:
+        frame = await loop.run_in_executor(None, _capture_summary_frame, addr)
+    except ValueError as exc:
+        logger.warning("summary 抓帧失败 addr=%s err=%s", addr, exc)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("summary 打开或读取视频源异常 addr=%s", addr)
+        raise HTTPException(status_code=500, detail=f"读取视频源失败: {exc}") from exc
+
+    try:
+        text = await loop.run_in_executor(None, _qwen_caption, frame, prompt)
+    except Exception as exc:
+        logger.exception("summary VLM 推理失败 addr=%s", addr)
+        raise HTTPException(status_code=500, detail=f"VLM 推理失败: {exc}") from exc
+
+    cost_ms = (time.monotonic() - request_t0) * 1000.0
+    logger.info(
+        "summary 完成 cost=%.1fms addr=%s prompt_len=%d",
+        cost_ms,
+        addr,
+        len(prompt),
+    )
+    return JSONResponse(
+        {
+            "summary": text,
+            "cost_ms": round(cost_ms, 1),
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
